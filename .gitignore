@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# data/tw_stocks.db 刻意「不」排除 —— 這是本專案的交付物本體（~300KB，小），
+# 之後的視覺化網頁預計直接讀這個檔案，track 進 repo 比每次重新 build 方便。
+# 理由詳見 HANDOFF.md「關鍵決策」。
