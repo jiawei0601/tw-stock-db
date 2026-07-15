@@ -69,10 +69,14 @@ def test_industry_name_mostly_populated(conn):
     assert missing / total < 0.01, f"industry_name 缺漏比例過高: {missing}/{total}"
 
 
-def test_stock_groups_table_exists_and_empty(conn):
-    """本次任務只建表結構，不填資料（族群/概念股標記留待未來任務）。"""
-    cur = conn.execute("SELECT COUNT(*) FROM stock_groups")
-    assert cur.fetchone()[0] == 0
+def test_stock_groups_rows_reference_valid_stocks(conn):
+    """stock_groups 為概念股/族群標記（非官方資料來源，人工整理），每筆都必須對應
+    stocks 表中真實存在的 stock_id，不允許孤兒列。"""
+    cur = conn.execute(
+        "SELECT COUNT(*) FROM stock_groups g "
+        "LEFT JOIN stocks s ON g.stock_id = s.stock_id WHERE s.stock_id IS NULL"
+    )
+    assert cur.fetchone()[0] == 0, "stock_groups 有對應不到 stocks 的孤兒列"
 
 
 def test_stock_groups_schema_has_expected_columns(conn):

@@ -3,7 +3,10 @@
 見 docs/data-sources.md 第 1-2 節（endpoint 實測結果，2026-07-16）。
 
 來源：https://isin.twse.com.tw/isin/C_public.jsp?strMode=2（上市）／strMode=4（上櫃）
-- 回傳 HTML table，非 JSON；編碼實測為 Big5（MS950），不可用預設 utf-8 解碼（會亂碼）。
+- 回傳 HTML table，非 JSON；編碼實測為 MS950（cp950，Big5 的 Microsoft 超集），不可用預設
+  utf-8 解碼（會亂碼）。**注意：不可用 Python 標準 'big5' codec**——'big5' 不含「碁」等
+  擴充字集字元（byte 0xf9 起會 raise UnicodeDecodeError 或被 requests 靜默 replace 成
+  U+FFFD 亂碼，例如 6285 啟碁 曾因此寫入資料庫變成「啟��」），必須用 'cp950'。
 - 頁面依「有價證券類型」分成多個區塊（股票／權證／ETF／特別股／TDR／REITs／創新板...），
   區塊標題是 `<td colspan=7><B>區塊名稱<B></td>`，區塊內每列固定 7 欄：
   代號及名稱、ISIN、上市日、市場別、產業別、CFICode、備註。
@@ -76,7 +79,7 @@ def _parse_stock_section(html: str) -> list[dict]:
 def _fetch(str_mode: int, market: str) -> list[dict]:
     """market: 'TWSE'（strMode=2）或 'TPEx'（strMode=4）。空資料回空 list，不造假。"""
     resp = get(SOURCE, _URL, params={"strMode": str_mode}, throttle_bucket="isin",
-               encoding="big5")
+               encoding="cp950")
     html = resp.text
     if not html or "股票" not in html:
         # HTTP 200 但頁面內容不含預期區塊（例如證交所改版），回空並讓呼叫端自行決定是否視為異常

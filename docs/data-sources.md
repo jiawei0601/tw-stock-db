@@ -7,8 +7,12 @@
 
 - URL：`https://isin.twse.com.tw/isin/C_public.jsp?strMode=2`
 - 格式：HTML table（**不是 JSON**）
-- 編碼：宣告 `charset=MS950`，實測用 `requests` 的 `resp.encoding = "big5"` 才能正確解碼；
-  用預設 utf-8 或 requests 自動偵測會亂碼。
+- 編碼：宣告 `charset=MS950`，須用 `requests` 的 `resp.encoding = "cp950"` 才能正確解碼；
+  用預設 utf-8 或 requests 自動偵測會亂碼。**注意：`resp.encoding = "big5"`（Python 標準
+  `'big5'` codec）看似能跑，但該 codec 不含「碁」等 MS950 擴充字集字元，實測會讓
+  「啟碁」「宏碁」等 13 檔股票名稱的擴充字元被 requests 靜默轉成 U+FFFD 亂碼，且不會
+  拋錯，肉眼掃過去以為抓對了——這是第一輪任務真實踩到、直到概念股資料核對才發現的 bug。
+  務必用 `'cp950'`（MS950 在 Python 的正確 codec 名稱），不要用 `'big5'`。
 - 結構：整頁依「有價證券類型」分成多個區塊，每個區塊由
   `<td colspan=7><B>區塊名稱<B></td>` 標題列開頭，區塊內每列固定 7 欄：
   `有價證券代號及名稱`、`ISIN`、`上市日`、`市場別`、`產業別`、`CFICode`、`備註`。
