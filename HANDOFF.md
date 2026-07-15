@@ -2,7 +2,7 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-16（第二輪：encoding 修 bug + 概念股族群首批資料）
+- 最後更新：Claude Code @ 2026-07-16（第三輪：91 檔概念股的月營收/籌碼集中度/三大法人動態）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
@@ -27,20 +27,47 @@
     `stock_groups`（`group_type='concept'`, `source='使用者提供-2026 AI供應鏈概念股整理'`），
     目前 98 筆 (stock_id, group_name) 對應、涵蓋 91 檔不重複股票。
     核對時發現並修正原始清單 2 處代號錯誤（見下方關鍵決策）。
-- 進行中（做到哪一步）：無，本次任務範圍內的項目已全部完成。
+  - **【第三輪】91 檔概念股的三種延伸資料**：新增 `collectors/revenue.py`、
+    `collectors/shareholding.py`、`build_fundamentals.py`、`build_institutional_summary.py`，
+    只針對 `SELECT DISTINCT stock_id FROM stock_groups`（動態查詢，不寫死清單）這批股票：
+    - **月營收年增率與趨勢**（`monthly_revenue` 表）：TWSE opendata `t187ap05_L` +
+      TPEx opendata `mopsfin_t187ap05_O`，91/91 檔全數涵蓋（官方 opendata 全量下載後
+      本地過濾，不逐檔打 API）。含當月營收、月增率、年增率（`yoy_pct`，即使用者所稱
+      「年增率」）、累計營收年增率、備註。只有「最新一期」，無歷史序列（來源限制）。
+    - **籌碼集中度**（`shareholding_concentration` 表）：TDCC 集保結算所股權分散表
+      opendata `id=1-5`，91/91 檔全數涵蓋。15 級距明細存 `levels_json`，另計算
+      `pct_gt_400zhang`／`pct_gt_1000zhang` 兩個代理集中度指標（>400張／>1000張持股人
+      合計占集保庫存比例）。**每週更新一次、只有當週最新一期快照，無歷史**（來源限制）。
+    - **三大法人近期買賣超動態**（`institutional_flow_summary` + `institutional_flow_daily`
+      表）：讀取（唯讀）`C:\CLAUDE\tw_cache\institutional.db`（tw-momentum-scanner 專案
+      既有共用資產，未複製/搬動），彙總近 5/20/60 日外資/投信/自營商買賣超累計 + 外資
+      連續買/賣超天數（streak）。**91 檔中僅 71 檔涵蓋**（institutional.db 本身只涵蓋
+      tw-momentum-scanner 篩選過的 696 檔動能股歷史清單，不是全市場，本專案 91 檔中有
+      20 檔從未進過那份清單，查無資料，如實留空不臆測，缺漏清單見下方雷區）。
+      `institutional_flow_daily` 額外保留近 60 個交易日逐日明細（明確時間窗，不無限
+      累積），供未來視覺化畫走勢/sparkline 用。
+    - 三個測試維度合計新增 `tests/test_fundamentals_content.py`（14 個測試），全綠；
+      全專案測試 `python -m pytest tests/ -q` 共 24 個測試全綠。
+    - `docs/data-sources.md` 新增第 6-9 節記錄新 endpoint 實測結果（欄位、陷阱、限制）。
+- 進行中（做到哪一步）：無，第三輪任務範圍內的項目已全部完成。
 - 下一步（下一個任務，非本次範圍）：
   1. **持續補充族群/概念股**：`stock_groups` 是人工整理/使用者提供資料，非官方來源，
      之後有新的族群清單可比照同樣模式（核對代號後 `INSERT OR REPLACE`）繼續累積，
-     不需改 schema。
-  2. **視覺化網頁**：讀 `data/tw_stocks.db` 的 `stocks` + `stock_groups` 做
-     「資金流向依板塊/族群」儀表板。本次任務完全沒有動這塊。
-  3. **個股基本面/籌碼面資料整理**（使用者已提出但尚未執行，範圍待釐清）：使用者想針對
-     `stock_groups` 名單內特定股票整理營收佔比、籌碼集中度、法人進出動態，需先確認
-     範圍（全部 91 檔還是子集）、輸出形式（寫進 DB 新表還是報告文件）再動工。
-  4. （可選）**定期刷新排程**：目前資料庫是單次快照，若要保持最新，需要排程重跑
-     `python build_db.py`（比照 tw-momentum-scanner 用 Windows 排程或 cron）。本次未設定。
-     注意：重跑 `build_db.py` 只會刷新 `stocks` 表，不會動 `stock_groups`（見 Interface
-     Contract），概念股標記資料是安全的。
+     不需改 schema。`build_fundamentals.py`/`build_institutional_summary.py` 都是動態
+     查詢 `stock_groups`，族群名單擴充後直接重跑即可自動涵蓋新股票，不需改程式。
+  2. **視覺化網頁**：讀 `data/tw_stocks.db` 的 `stocks` + `stock_groups` +
+     `monthly_revenue` + `shareholding_concentration` + `institutional_flow_summary`/
+     `institutional_flow_daily` 做「資金流向依板塊/族群」儀表板。三輪任務都完全沒有
+     動這塊。
+  3. **補齊 institutional.db 缺漏的 20 檔法人資料**（若使用者需要）：這 20 檔從未進過
+     tw-momentum-scanner 的動能股篩選清單，若要補齊，需另外對 TWSE/TPEx 官方三大法人
+     買賣超 API（例如 TWSE `fund/T86`）抓歷史，寫一個新 collector，不能靠共用資料庫。
+  4. （可選）**定期刷新排程**：目前三個資料庫產出都是單次快照，若要保持最新，需要排程
+     重跑 `python build_db.py` + `python build_fundamentals.py` +
+     `python build_institutional_summary.py`（比照 tw-momentum-scanner 用 Windows
+     排程或 cron，且 `build_institutional_summary.py` 的新鮮度上限取決於
+     `tw_cache/institutional.db` 本身多久更新一次，不受本專案排程頻率控制）。本次未設定。
+     注意：三個 build 腳本互不覆寫彼此的表，可任意順序/頻率重跑。
 - 關鍵決策 + 為什麼：
   - **主要產業別來源用 ISIN HTML 頁面而非 TWSE OpenAPI JSON**：OpenAPI
     (`t187ap03_L`/`mopsfin_t187ap03_O`) 的產業別欄位只有兩碼數字代碼（如 "24"），
@@ -63,6 +90,27 @@
     標成代號 5536（實際 5536 是聖暉，力麒正確代號是 5512）、「山林水」標成代號 5412
     （查無此代號，正確是 8473）。兩處都先用 `stocks` 表反查、WebSearch 核實正確代號後
     才寫入，並保留 `stocks` 表的官方名稱為準（使用者提供的名稱僅供比對參考）。
+  - **【第三輪】月營收/籌碼集中度做成快照表（覆蓋式），三大法人動態也做成快照表**：
+    三個來源本身都只提供「當下最新」（月營收=最新一期、籌碼集中度=當週最新一期、
+    institutional.db 的近 5/20/60 日彙總=以查詢當下的 MAX(date) 為基準往回算），沒有
+    「使用者自己截取歷史區間」的語意，做成 append-only 時序表只會白白累積、卻沒有
+    真正可比較的歷史序列（因為來源本身沒給歷史）。若未來要長期追蹤趨勢，正確做法是
+    **排程定期執行 build 腳本、每次都存一份新快照到獨立檔案或加時間戳記分區**，而不是
+    現在就把這幾張表改成 append-only（那樣做只是徒增複雜度、沒有實質效益）。
+    唯一例外是 `institutional_flow_daily`：因為 institutional.db 本身有逐日歷史，這裡
+    不是「來源只給最新」而是「本專案主動選擇只保留近 60 日」，所以它是「有明確時間窗
+    的覆蓋式快照」，不是無限累積的時序表，跟前述兩種快照的差別在於它保留了一小段
+    歷史窗口而非單一時間點。
+  - **`institutional_flow_summary` 是「有資料才寫一列」，不是「91 列、缺資料留 NULL」**：
+    91 檔中查無資料的 20 檔，`institutional_flow_summary` 裡完全沒有那一列（不是一整列
+    NULL）。這個設計選擇是因為「查無資料」跟「有資料但欄位是 0」是不同語意——如果留一整列
+    NULL，容易被誤讀成「近期買賣超為 0」；不寫入該列，查詢端用 LEFT JOIN 就能自然分辨
+    「這檔沒有法人動態資料可看」，比留 NULL 列更誠實。
+  - **籌碼集中度指標選擇「留 15 級距原始明細 + 算 2 個代理指標」，不是只留代理指標**：
+    只留 `pct_gt_400zhang`／`pct_gt_1000zhang` 兩個數字最省空間，但未來如果想換一個
+    門檻（例如改看 >600張）就要重新抓資料；`levels_json` 把 15 級距完整明細都留著，
+    换門檻只要重新查詢 JSON 就好，不必重新打 TDCC API（反正 CSV 本身就是全市場一次
+    下載，多存幾個欄位幾乎不增加成本）。
 - 雷區 / 別碰：
   - ISIN 頁面編碼**必須**手動指定 `resp.encoding = "cp950"`（不是 `"big5"`——Python
     標準 `'big5'` codec 不含「碁」等擴充字集字元，會 decode 失敗或被 requests 靜默轉成
@@ -76,10 +124,28 @@
     沒有歷史或單檔查詢參數，也**不保證涵蓋所有 ISIN 頁面上的股票**（剛掛牌的新股可能
     暫時查不到，這種情況 `industry_code` 就是 NULL，屬預期行為，不是 bug）。
   - `python -m pytest` 前必須先跑過 `python build_db.py`，測試不會自己去打網路 API。
+  - **【第三輪】TDCC CSV 的證券代號欄位是固定 6 碼、右側補半形空格**（`"2330  "`），
+    比對前一定要 `.strip()`，忘記會導致 91 檔全部查詢回 0 筆（本專案實測時真的踩過，
+    見 `docs/data-sources.md` 第 8 節）。
+  - **【第三輪】institutional.db 的 stock_id 帶 yfinance 風格市場後綴**
+    （TWSE 股票 `.TW`、TPEx 股票 `.TWO`，例如 `2330.TW`），不是純 4 碼代號，用純代號查詢
+    一樣會 100% 落空（本專案實測時也踩過，見 `docs/data-sources.md` 第 9 節）。
+  - **【第三輪】institutional.db 的「最新日期」不等於「今天」**：實測 2026-07-16 執行
+    `build_institutional_summary.py` 時，`institutional.db` 的 `MAX(date)` 是
+    `2026-05-28`（約 1.5 個月前），所以「近 5/20/60 日」是以 2026-05-28 往回算，不是
+    以執行當下的日曆日往回算。每次重跑都要用 `SELECT MAX(date)` 查詢實際值，程式已經
+    這樣做，但**看到 `institutional_flow_summary.latest_date` 是舊日期不要當成 bug**，
+    先去查 `tw_cache/institutional.db` 本身上次更新是什麼時候。
+  - **【第三輪】`institutional.db` 只准讀取**：`build_institutional_summary.py` 用
+    `sqlite3.connect(f"file:{path}?mode=ro", uri=True)` 開唯讀連線，任何修改這個腳本
+    的人都不可以把它改成可寫連線，也不可以把這個檔案複製進本 repo 的 `data/` 目錄
+    （它是跨專案共用資產，屬於 `tw-momentum-scanner`）。
 - 怎麼跑 / 怎麼測：
   ```bash
   cd C:\CLAUDE\investing\tw-stock-db
   pip install -r requirements.txt
-  python build_db.py            # 整批刷新 data/tw_stocks.db
-  python -m pytest tests/ -q    # 驗證資料庫內容
+  python build_db.py                       # 整批刷新 stocks + stock_groups
+  python build_fundamentals.py             # 91 檔月營收 + 籌碼集中度快照
+  python build_institutional_summary.py    # 91 檔三大法人近期動態快照（讀 tw_cache/institutional.db）
+  python -m pytest tests/ -q               # 驗證資料庫內容（24 個測試）
   ```
