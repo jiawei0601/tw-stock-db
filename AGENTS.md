@@ -47,9 +47,15 @@
     **注意：backfill 進行中請勿同時對同一個 `data/tw_stocks.db` 跑其他 build 腳本**
     （SQLite 單寫入者限制，長跑期間持有未 commit 的交易會讓其他寫入直接
     `database is locked`，見 `docs/data-sources.md` 第 12 節）。
-  - 四個 build 腳本彼此獨立、互不覆寫對方的表，可任意順序重跑（但不可同時併發跑，見上），
-    `build_revenue_history.py`／`build_fundamentals.py`／`build_institutional_summary.py`
-    都依賴 `stock_groups` 已有資料，須先跑過 `build_db.py`。
+  - `python build_sector_flow.py [--db-path PATH]`（**【第六輪】** `sector_flow_daily`
+    表，從本地 `institutional_flow_daily` JOIN `stocks.industry_name` 聚合每個板塊每日
+    三大法人買賣超合計，只涵蓋 `stock_groups` 名單（91 檔）橫跨的板塊，不對外發送任何
+    請求，秒級完成；整批快照覆蓋，idempotent；依賴 `build_institutional_summary.py`
+    已跑過。
+  - 五個 build 腳本彼此獨立、互不覆寫對方的表，可任意順序重跑（但不可同時併發跑，見上），
+    `build_revenue_history.py`／`build_fundamentals.py`／`build_institutional_summary.py`／
+    `build_sector_flow.py` 都依賴 `stock_groups` 已有資料，須先跑過 `build_db.py`；
+    `build_sector_flow.py` 另外依賴 `institutional_flow_daily` 已有資料。
 
 ## 架構
 
@@ -73,6 +79,9 @@ build_institutional_summary.py     -> 【第五輪】orchestrate：對 instituti
                                   增量 + 回補式查詢 TWSE/TPEx 近 3 年（約 750 個交易日）
                                   -> 從本地 institutional_flow_daily 彙總近 5/20/60 日
                                   法人買賣超 + streak -> 印摘要
+build_sector_flow.py               -> 【第六輪】orchestrate：institutional_flow_daily
+                                  JOIN stocks.industry_name -> 每板塊每日買賣超合計
+                                  -> sector_flow_daily（純本地聚合，不對外發送請求）
 ```
 
 ## Interface Contract（違反視為 bug）
@@ -90,7 +99,9 @@ build_institutional_summary.py     -> 【第五輪】orchestrate：對 instituti
    `(stock_id, ym)`——近 3 年月營收時序表，不再是單列快照；`institutional_flow_daily`
    PK 仍是 `(stock_id, date)`，但視窗從「近 60 交易日」擴大為「近 3 年（約 750 交易日）
    累積式時序表」。`institutional_flow_summary` 的 5/20/60 日彙總計算邏輯不變，只是
-   資料來源改讀本地 `institutional_flow_daily`。理由見 HANDOFF.md 關鍵決策。
+   資料來源改讀本地 `institutional_flow_daily`。**【第六輪】** `sector_flow_daily` PK
+   為 `(industry_name, date)`，範圍限定 `stock_groups` 名單橫跨的板塊（非全市場），
+   理由見 HANDOFF.md 關鍵決策。
 
 ## 資料源
 

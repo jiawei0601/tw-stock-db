@@ -2,8 +2,8 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-16（第五輪：月營收 + 三大法人動態從「只有最新一期」
-  擴充為「近 3 年歷史」，詳見下方第五輪紀錄）
+- 最後更新：Claude Code @ 2026-07-16（第六輪：新增 `sector_flow_daily` 板塊資金流彙總表
+  + 三年板塊間資金流動關係分析，詳見下方第六輪紀錄）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
@@ -124,21 +124,53 @@
     - `AGENTS.md` 更新架構圖與 Interface Contract 反映 schema 異動；新增
       `build_revenue_history.py` 使用說明；`build_institutional_summary.py` 說明改為
       「增量 + 回補式」而非「單次抓 60 天」。
-- 進行中（做到哪一步）：無，第五輪任務範圍內的項目已全部完成。
+  - **【第六輪】`sector_flow_daily` 板塊資金流彙總表 + 板塊間資金流動關係分析**：
+    新增 `build_sector_flow.py`，從 `institutional_flow_daily` JOIN `stocks.industry_name`
+    聚合出「每個板塊每日三大法人買賣超合計」，PK 為 `(industry_name, date)`，idempotent
+    整批刷新。**範圍限定在 `stock_groups` 名單（91 檔）橫跨的 13 個板塊**，不是全市場
+    34 個板塊（原因見下方關鍵決策，使用者已確認接受此範圍）。實測 9750 列（13 板塊 ×
+    750 交易日），涵蓋 2023-06-12 ~ 2026-07-15。
+    - `tests/test_sector_flow.py` 新增 5 個測試（表存在且非空、板塊數與 universe 一致、
+      `total_net` 等於三分量加總、抽查某日聚合數字與逐股加總一致、日期範圍約 3 年）。
+      全專案測試共 33 個，全綠。
+    - 用 pandas 做一次性分析（相關係數矩陣、lead-lag 交叉相關、3 年累計 vs 近 60 日
+      排行），結果與方法論寫成報告：`analysis/sector-flow-2026-07-16.md`。**這份報告
+      本身不是可重跑的 build script，是一次性分析輸出**，之後要更新結論需要重新執行
+      分析邏輯（目前只存在於這次的對話過程，未沉澱成腳本，見下方下一步）。
+    - 核心發現：半導體業/電子零組件業/其他電子業三年來是主要資金匯集板塊；電機機械
+      （重電/機器人相關）三年累計是最大淨流出板塊且近期仍持續流出，與市場熱度形成
+      落差；電子零組件業出現「三年累計第二大流入 → 近60日轉為第二大流出」的訊號，
+      可能反映資金從零組件供應鏈往半導體本業集中的輪動。板塊間相關性整體偏弱
+      （多數 \|r\|<0.35），沒有找到強烈可操作的領先落後規律，報告中誠實記錄此結果。
+- 進行中（做到哪一步）：無，第六輪任務範圍內的項目已全部完成。
 - 下一步（下一個任務，非本次範圍）：
   1. **持續補充族群/概念股**：`stock_groups` 是人工整理/使用者提供資料，非官方來源，
      之後有新的族群清單可比照同樣模式（核對代號後 `INSERT OR REPLACE`）繼續累積，
      不需改 schema。`build_revenue_history.py`/`build_fundamentals.py`/
-     `build_institutional_summary.py` 都是動態查詢 `stock_groups`，族群名單擴充後
-     直接重跑即可自動涵蓋新股票，不需改程式（但新股票首次加入時月營收/三大法人動態
-     都要重新 backfill 近 3 年歷史，會產生跟第一次 backfill 同等級的請求量與耗時，
-     不是免費的）。
-  2. **視覺化網頁**：讀 `data/tw_stocks.db` 的 `stocks` + `stock_groups` +
+     `build_institutional_summary.py`/`build_sector_flow.py` 都是動態查詢
+     `stock_groups`，族群名單擴充後直接重跑即可自動涵蓋新股票，不需改程式（但新股票
+     首次加入時月營收/三大法人動態都要重新 backfill 近 3 年歷史，會產生跟第一次
+     backfill 同等級的請求量與耗時，不是免費的）。
+  2. **擴大板塊資金流分析到全市場 1971 檔**（若使用者需要真正的全市場板塊輪動圖，
+     不只是電子供應鏈內部）：把 `institutional_flow_daily` 的 backfill 範圍從
+     `stock_groups`（91 檔）擴大到 `stocks`（全部 1971 檔）。**API 請求次數不變**
+     （T86／TPEx 端點本來就是「查一天回全市場」，只是目前寫入時篩選成 91 檔，
+     擴大範圍只需放寬篩選條件，不需要更多網路請求），但儲存量會從 6.8 萬列增加到
+     約 148 萬列（91→1971 檔，約 21 倍），估計仍需完整跑一次 60-70 分鐘的長迴圈
+     （因為篩選邏輯在寫入端，仍要重新逐日查詢）。完成後 `sector_flow_daily` 也要
+     重新設計覆蓋範圍（拿掉 `WHERE f.stock_id IN (SELECT ... FROM stock_groups)`
+     這個限制子句）。
+  3. **把一次性板塊流動分析沉澱成可重跑腳本**：`analysis/sector-flow-2026-07-16.md`
+     的相關係數/lead-lag/累計排行計算目前只是分析當下跑的 pandas script，沒有存成
+     repo 裡的腳本。若要定期更新這份分析（例如每週看一次最新的板塊輪動狀況），
+     需要把分析邏輯寫成 `analyze_sector_flow.py` 之類的腳本，這次沒有做（使用者
+     要的是「這次先看能不能整合出結果」，不是「做成常態化分析工具」）。
+  4. **視覺化網頁**：讀 `data/tw_stocks.db` 的 `stocks` + `stock_groups` +
      `monthly_revenue`（近 3 年時序）+ `shareholding_concentration` +
-     `institutional_flow_summary`/`institutional_flow_daily`（近 3 年時序）做
-     「資金流向依板塊/族群」儀表板。五輪任務都完全沒有動這塊，現在兩個維度都已經有
-     真正的歷史資料可以畫趨勢圖/走勢圖了。
-  3. **定期刷新排程**：`build_db.py` 與 `build_fundamentals.py`（籌碼集中度）仍是
+     `institutional_flow_summary`/`institutional_flow_daily`（近 3 年時序）+
+     `sector_flow_daily`（板塊彙總）做「資金流向依板塊/族群」儀表板。六輪任務都
+     完全沒有動這塊，現在資料底層（含板塊彙總）都已經到位。
+  5. **定期刷新排程**：`build_db.py` 與 `build_fundamentals.py`（籌碼集中度）仍是
      整批快照覆蓋，可任意頻率重跑。`build_revenue_history.py` 與
      `build_institutional_summary.py` 第五輪起都已改成增量式，重跑成本低（前者最近
      2 個月強制重抓 + 新月份自動涵蓋、後者只抓比本地最新日期更新的新交易日），
@@ -215,6 +247,13 @@
     門檻（例如改看 >600張）就要重新抓資料；`levels_json` 把 15 級距完整明細都留著，
     换門檻只要重新查詢 JSON 就好，不必重新打 TDCC API（反正 CSV 本身就是全市場一次
     下載，多存幾個欄位幾乎不增加成本）。
+  - **【第六輪】板塊資金流分析範圍維持 91 檔 universe，沒有先擴大到全市場**：一開始
+    發現 91 檔只橫跨全市場 34 個板塊中的 13 個、且高度集中在電子供應鏈，曾用
+    AskUserQuestion 詢問使用者是否要先花 60-70 分鐘擴大到全市場 1971 檔再分析，
+    使用者選擇「先用現有 91 檔分析，範圍限定在電子/半導體供應鏈內部板塊」。因此
+    `sector_flow_daily` 與 `analysis/sector-flow-2026-07-16.md` 的結論**只代表電子
+    供應鏈內部的資金輪動，不是全市場板塊輪動**，報告開頭已用粗體標注這個限制，
+    未來若要看金融/傳產/生技等板塊，需要先做上方下一步第 2 點的全市場擴大。
 - 雷區 / 別碰：
   - ISIN 頁面編碼**必須**手動指定 `resp.encoding = "cp950"`（不是 `"big5"`——Python
     標準 `'big5'` codec 不含「碁」等擴充字集字元，會 decode 失敗或被 requests 靜默轉成
