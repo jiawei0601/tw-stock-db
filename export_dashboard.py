@@ -270,10 +270,11 @@ def _trust_spotlight(conn: sqlite3.Connection, weeks: list[dict], market_weekly:
         "next_quarter_end": quarter_info,
         "top5_buying_sectors": sector_streaks[:5],
         "seasonality_note": (
-            "投信季底最後 5 個交易日日均淨買超 +4,314 萬元，高於其他日均值 +1,676 萬元"
-            "（差距 +2,638 萬元，較平日高約 157%，t 檢定 p=0.024 達統計顯著），"
+            "投信季底最後 5 個交易日日均淨買超 +4,314 萬股，高於其他日均值 +1,676 萬股"
+            "（差距 +2,638 萬股，較平日高約 157%，t 檢定 p=0.024 達統計顯著），"
             "是本專案五份分析中唯一明確且符合市場傳說的季節性規律"
-            "（見 flow-persistence-seasonality-2026-07-16.md）。"
+            "（見 flow-persistence-seasonality-2026-07-16.md；此統計為股數口徑，"
+            "不能直接換算成新台幣金額）。"
         ),
     }
 

@@ -179,6 +179,16 @@ def test_trust_seasonality_note_cites_report(data):
     assert "flow-persistence-seasonality" in data["trust"]["seasonality_note"]
 
 
+def test_trust_seasonality_note_uses_share_unit_not_currency(data):
+    """來源報告 B3 表的季底作帳統計是**股數口徑（萬股）**，報告方法限制第 1 點
+    明確警告不能直接換算成新台幣金額。這裡防止再度把它標成「萬元」（單位混淆是
+    本專案一路在防的錯誤類型）。"""
+    note = data["trust"]["seasonality_note"]
+    assert "萬股" in note
+    assert "股數口徑" in note
+    assert "萬元" not in note
+
+
 # ---- 使用須知 ----
 
 def test_notice_section_present(exported_html):
