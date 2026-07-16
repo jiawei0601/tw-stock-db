@@ -266,3 +266,84 @@
   （2026-05-28），與「今天」有落差。改用官方 API 直抓後（第 9-10 節），這 20 檔與
   資料新鮮度不一致的問題都已解除，91/91 全數涵蓋且 `latest_date` 集中在最近 1-2 個
   交易日。
+
+## 12. 【第五輪】三大法人動態擴大為近 3 年歷史（2026-07-16 實測）
+
+第 9-10 節的 TWSE `fund/T86` + TPEx `3itrade_hedge_result.php` collector 本身沒有變，
+第五輪只改變 `build_institutional_summary.py` 的抓取範圍與策略：
+
+- **從「每次執行都整批重抓近 60 個交易日」改為「累積近 3 年（約 750 個交易日）+
+  增量刷新」**：新增 `institutional_fetch_log` 表（PK `(market, date)`）記錄「這個
+  市場+日期是否已經查詢過、當天是不是交易日」，讓程式精確判斷「已經抓過、可以跳過」
+  跟「還沒抓過、需要打 API」，不必用 `institutional_flow_daily` 裡有沒有那一列去猜測
+  （因為「查過但非交易日」跟「根本沒查過」在 `institutional_flow_daily` 裡长得一樣，
+  都是沒有那一列）。
+- **`institutional_flow_summary`（5/20/60 日彙總 + streak）不再對外發送額外請求**：
+  改成讀本地 `institutional_flow_daily` 最近 60 筆計算，計算邏輯（`_sum_net`、
+  `_foreign_streak`）完全不變，只是資料來源從「即時 fetch 的 in-memory dict」換成
+  「SQLite `SELECT ... ORDER BY date DESC LIMIT 60`」。
+- **實測執行時間**：750 個交易日 x 2 市場（TWSE `MIN_INTERVAL_SEC=1.7` 秒/請求節流）
+  首次全量 backfill 實測約 60-70 分鐘（詳細數字見 HANDOFF.md 第五輪紀錄）。之後重跑
+  （日常刷新）只需要抓「比本地資料庫目前最新日期更新」的新增交易日，通常幾秒到
+  數十秒內完成。
+- **SQLite 併發限制（本專案首次踩到，值得記錄）**：`build_institutional_summary.py`
+  長時間 backfill 期間持續對 `data/tw_stocks.db` 做 `INSERT OR REPLACE` 但只每湊滿
+  20 個交易日才 `commit()` 一次；Python `sqlite3` 模組預設對 DML 語句會開一個隱式
+  transaction 直到明確 `commit()`，這段期間內若有另一支腳本（例如同時手動跑
+  `build_fundamentals.py`）嘗試對同一個 db 檔案寫入，會拿到
+  `sqlite3.OperationalError: database is locked`（本專案實測時真的撞到）。這不是
+  bug，是 SQLite 單寫入者的正常行為——**同一個 `data/tw_stocks.db` 檔案不要同時跑
+  兩支 build 腳本**，長跑的 `build_institutional_summary.py` backfill 進行中時，
+  其他 build 腳本應排隊等它結束（或跑完後）再執行。
+
+## 13. 【第五輪】MOPS 公開資訊觀測站歷史月營收封存頁面（2026-07-16 實測）
+
+`collectors/revenue.py`（TWSE/TPEx opendata `t187ap05_L`/`mopsfin_t187ap05_O`）只回「最新
+一期全量」，沒有歷史或單檔查詢參數，是第三輪就記錄過的已知限制（見第 6-7 節）。第五輪找到
+唯一能查「歷史特定年月」月營收的免費來源：MOPS 歷史封存頁面。
+
+- URL 格式：`https://mopsov.twse.com.tw/nas/t21/{market}/t21sc03_{roc_year}_{month}_0.html`
+  （`market` 為 `sii` 上市 / `otc` 上櫃；`roc_year` 民國年；`month` 1~12 不補零）。
+  **注意網域是 `mopsov.twse.com.tw`，不是 `mops.twse.com.tw`**（後者實測 2026-07-16
+  回 404）。
+- 格式：HTML（非 JSON），宣告 `charset=big5`，但實測須用 `resp.content.decode('cp950')`
+  才能正確解碼中文（跟 `collectors/isin.py` 踩過的坑同理，Python 標準 `'big5'` codec
+  不含部分擴充字集字元，不可用）。
+- 結構：整頁依產業別分成多個子表格，每個公司一列固定 11 欄：公司代號、公司名稱、
+  當月營收、上月營收、去年當月營收、上月比較增減(%)（MoM）、去年同月增減(%)（YoY）、
+  當月累計營收、去年累計營收、前期比較增減(%)（累計 YoY）、備註。頁面另有一個
+  **頁面級**「出表日期」（非逐公司），本專案拿它當該頁全部列的 `announce_date` 近似值
+  （不是每家公司個別公告日，來源格式本身沒有逐公司公告日這個欄位）。
+- **陷阱 1（真的會讓程式掛住，不是效能問題）：row parsing regex 絕對不要用
+  `\s*` 去「順便」吃掉數字欄位的前導空白**——`\s*` 與緊接在後面、同樣會吃空白的
+  `[^<]*` 對同一段空白字元存在歧義的多種切法組合，在近 44 萬字元的單行 HTML（整頁沒有
+  換行）上會觸發 regex 引擎的**災難性回溯（catastrophic backtracking）**，實測直接
+  掛住、`timeout 20s` 都跑不完（用 `python -u` + `timeout` 指令才抓到是這裡卡住，
+  一般執行時只會看到程式「沒有任何輸出、也不會結束」，容易誤判成網路卡住）。修法：
+  `[^<]*` 本身就會吃掉數字前導的空白字元，拿到字串後再 `.strip()` 即可，完全不需要
+  額外的 `\s*`。`collectors/revenue_history.py` 的 `_ROW_RE` 已避開這個陷阱。
+- **陷阱 2（真實 bug，會讓有備註的公司整列被靜默漏掉）：最後一欄「備註」的
+  `<td>` alignment 不是固定 `align=center`**——備註為空（顯示 `-`）時是
+  `<td align=center>`，但備註有實際文字時（例如 2330 台積電 2026-06 月營收備註
+  「因先進製程產品需求增加所致。」）該欄變成 `<td align=left>`。第一版 regex 只比對
+  `align=center`，實測導致 TWSE 2026-06 整頁從 984 筆掉到只剩 728 筆命中（漏掉的
+  233 筆全部是「有備註」的公司，包含 2330 這種絕對不該漏掉的權值股），直到用已知標的
+  2330 交叉核對才發現。修法：該欄位改用 `<td align=(?:left|center)>` 同時接受兩種
+  排版。**這是本專案第五輪任務實測踩到、教訓最深刻的一個 bug**（regex 語法完全正確、
+  能執行、有輸出，只是悄悄漏資料，若沒有拿已知標的核對很容易被忽略）。
+- **已知系統性缺口：3 檔 `-KY`（外國發行人）股票完全不在這份封存系列裡**——實測
+  91 檔目標清單中 `3665`（矽力-KY）、`3673`（TPK-KY）、`4977`（美時-KY）在任何測試過
+  的月份（2023-06、2024-06、2025-06、2026-01、2026-05、2026-06）都查無資料，逐一
+  `curl` 確認過不是 parsing 問題（原始 HTML 裡直接搜尋代號完全找不到字串），但
+  `collectors/revenue.py` 用的 opendata（`t187ap05_L`）**同一時間點卻查得到**這 3 檔
+  的最新一期資料。合理推測 MOPS 對「外國發行人」月營收另有獨立的彙總報表系列（IFRS
+  申報路徑不同），本專案未進一步深究確切的替代 URL（3/91 檔的影響範圍不值得投入更多
+  調查時間），如實記錄為已知缺口，不臆測、不硬湊資料。
+- **已知單月缺口：TWSE 2025-10（114年10月）archive 回應 HTTP 200 但 body 完全是
+  0 bytes**——跟其他「查無資料」的月份不同（後者會回約 871 bytes、內文包含
+  「查無資料」字樣），這個月份是**真正的空回應**，重試 3 次（間隔 2 秒）結果一致，
+  判斷是該站台這個月資料本身的已知缺口，非本專案 parsing bug、也非暫時性網路問題。
+  `collectors/revenue_history.py` 的空值判斷邏輯（`if not html or ...`）本來就能正確
+  處理這種情況（回空 list，不會噴例外），呼叫端會如實記錄成「這個月沒有月營收資料」。
+- **未來月份（尚未到來）判斷方式**：頁面出現「查無資料」字樣（例如查詢 2026 年 12 月，
+  當下實際日期是 2026-07-16），視為空月份，不是錯誤。

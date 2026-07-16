@@ -1,8 +1,10 @@
-"""驗證 build_fundamentals.py / build_institutional_summary.py 產出的新表內容是否合理。
+"""驗證 build_revenue_history.py / build_fundamentals.py / build_institutional_summary.py
+產出的表內容是否合理。
 
 跟 test_db_content.py 同樣原則：不重新打網路 API，只驗證 `data/tw_stocks.db` 裡已經寫好
 的內容。跑測試前必須先跑過：
     python build_db.py
+    python build_revenue_history.py
     python build_fundamentals.py
     python build_institutional_summary.py
 
@@ -10,8 +12,15 @@
 （TWSE `fund/T86` + TPEx `3itrade_hedge_result.php`，見 `collectors/institutional_official.py`
 與 `docs/data-sources.md` 第 10-11 節），不再讀取 `tw_cache/institutional.db`（該共用資料源
 只涵蓋 tw-momentum-scanner 篩選過的動能股清單，非全市場）。改用官方 API 後理論上應涵蓋
-全部 91 檔（全市場資料，非篩選過的子集合），且所有股票的 `latest_date` 應集中在最近 1-2
-個交易日內（少數個股因當日停牌等原因略舊屬正常，不強制要求全部相同）。
+全部 91 檔（全市場資料，非篩選過的子集合）。
+
+**【第五輪】兩個維度從「只有最新一期」擴充為「近 3 年歷史」**：
+    - `monthly_revenue` PK 從 `stock_id`（單列快照）改為 `(stock_id, ym)`（時序表），
+      資料源改用 MOPS 歷史封存頁面（`collectors/revenue_history.py`），backfill 近 36
+      個月，見 `docs/data-sources.md` 第 12 節。
+    - `institutional_flow_daily` 累積視窗從「近 60 個交易日」擴大為「近 3 年（約 750
+      個交易日）」，`institutional_flow_summary` 的 5/20/60 日彙總計算邏輯不變，但資料
+      來源改成讀本地 `institutional_flow_daily`（不再對外重複發送請求）。
 """
 from __future__ import annotations
 
@@ -39,41 +48,80 @@ def target_stock_ids(conn) -> set[str]:
     return {r[0] for r in cur.fetchall()}
 
 
-# ── monthly_revenue ──────────────────────────────────────────────────────────
+# ── monthly_revenue（第五輪起改為近 3 年時序表，PK=(stock_id, ym)）───────────
 
 def test_monthly_revenue_table_exists_with_expected_columns(conn):
     cur = conn.execute("PRAGMA table_info(monthly_revenue)")
-    cols = {row[1] for row in cur.fetchall()}
+    info = cur.fetchall()
+    cols = {row[1] for row in info}
     assert cols == {
         "stock_id", "company_name", "ym", "announce_date", "revenue",
         "revenue_prev_month", "revenue_last_year_month", "mom_pct", "yoy_pct",
         "revenue_cumulative", "revenue_cumulative_last_year", "cumulative_yoy_pct",
         "remark", "source_market", "updated_at",
     }
+    # PK 應為 (stock_id, ym) 複合鍵（PRAGMA table_info 的 pk 欄位是 1-indexed 的複合鍵順序，
+    # 0 表示不在 PK 內）——第五輪 schema 異動的核心驗證，不是單列快照。
+    pk_cols = {row[1]: row[5] for row in info if row[5] > 0}
+    assert pk_cols == {"stock_id": 1, "ym": 2}, f"monthly_revenue PK 應為 (stock_id, ym)，實際: {pk_cols}"
 
 
 def test_monthly_revenue_covers_most_target_stocks(conn, target_stock_ids):
     if not DB_PATH.exists():
         pytest.skip("db not built")
-    cur = conn.execute("SELECT COUNT(*) FROM monthly_revenue")
-    total = cur.fetchone()[0]
-    assert total > 0, "monthly_revenue 沒有任何資料，請先跑 python build_fundamentals.py"
-    # 官方 opendata 只回「最新一期全量」，理論上應涵蓋幾乎所有目標股票，容許極少數新股缺漏
-    assert total / len(target_stock_ids) >= 0.9, f"月營收覆蓋率過低: {total}/{len(target_stock_ids)}"
+    cur = conn.execute("SELECT COUNT(DISTINCT stock_id) FROM monthly_revenue")
+    distinct_stocks = cur.fetchone()[0]
+    assert distinct_stocks > 0, "monthly_revenue 沒有任何資料，請先跑 python build_revenue_history.py"
+    # 時序表覆蓋率看「涵蓋幾檔股票」而非「總列數」（總列數應是 檔數 x 月數量級）。
+    # 已知 3 檔 -KY（外國發行人）股票在 MOPS 歷史封存頁面系統性缺席（見 docs/data-sources.md
+    # 第 12 節），容許略低於 100% 覆蓋率。
+    assert distinct_stocks / len(target_stock_ids) >= 0.9, (
+        f"月營收覆蓋率過低: {distinct_stocks}/{len(target_stock_ids)}"
+    )
+
+
+def test_monthly_revenue_history_depth(conn, target_stock_ids):
+    """核心驗證：這是近 3 年歷史，不是單列快照。"""
+    cur = conn.execute("SELECT COUNT(DISTINCT ym) FROM monthly_revenue")
+    distinct_yms = cur.fetchone()[0]
+    # 目標 36 個月，允許少數月份因來源端缺頁（例如已知的 TWSE 2025-10 archive 回應空 body，
+    # 見 docs/data-sources.md 第 12 節）而略少。
+    assert distinct_yms >= 30, f"月營收歷史涵蓋月數過少（{distinct_yms} 個月），backfill 可能未完整執行"
+
+    cur = conn.execute("SELECT COUNT(*) FROM monthly_revenue WHERE stock_id = ?", ("2330",))
+    count_2330 = cur.fetchone()[0]
+    assert count_2330 >= 30, f"2330 台積電近 3 年月營收筆數過少（{count_2330} 筆），預期 30+ 筆"
 
 
 def test_monthly_revenue_known_stock_2330(conn):
     cur = conn.execute(
-        "SELECT company_name, revenue, yoy_pct, source_market FROM monthly_revenue WHERE stock_id = ?",
+        "SELECT company_name, revenue, yoy_pct, mom_pct, source_market "
+        "FROM monthly_revenue WHERE stock_id = ? ORDER BY ym DESC LIMIT 1",
         ("2330",),
     )
     row = cur.fetchone()
     assert row is not None, "2330 不在 monthly_revenue 中"
-    company_name, rev, yoy_pct, source_market = row
+    company_name, rev, yoy_pct, mom_pct, source_market = row
     assert company_name == "台積電"
     assert rev is not None and rev > 0
     assert yoy_pct is not None
+    assert mom_pct is not None
     assert source_market == "TWSE"
+
+
+def test_monthly_revenue_yoy_mom_sane_range(conn):
+    """量級合理性檢查：YoY/MoM 是百分比數字，不應是股數或營收金額誤植（防欄位錯位）。"""
+    cur = conn.execute(
+        "SELECT stock_id, ym, yoy_pct, mom_pct FROM monthly_revenue "
+        "WHERE yoy_pct IS NOT NULL OR mom_pct IS NOT NULL"
+    )
+    rows = cur.fetchall()
+    assert rows, "monthly_revenue 沒有任何 yoy_pct/mom_pct 資料"
+    for stock_id, ym, yoy_pct, mom_pct in rows:
+        if yoy_pct is not None:
+            assert -100 <= yoy_pct <= 2000, f"{stock_id} {ym} yoy_pct 超出合理範圍: {yoy_pct}"
+        if mom_pct is not None:
+            assert -100 <= mom_pct <= 2000, f"{stock_id} {ym} mom_pct 超出合理範圍: {mom_pct}"
 
 
 def test_monthly_revenue_no_orphan_rows(conn):
@@ -195,12 +243,29 @@ def test_institutional_flow_known_stock_2330(conn):
     assert abs(foreign_net_60d) / trading_days_covered < 200_000_000, f"2330 單日外資買賣超均量超出合理量級，疑似欄位錯位: {foreign_net_60d}"
 
 
-def test_institutional_flow_daily_bounded_to_60_days_per_stock(conn):
-    cur = conn.execute(
-        "SELECT stock_id, COUNT(*) FROM institutional_flow_daily GROUP BY stock_id HAVING COUNT(*) > 60"
-    )
-    violations = cur.fetchall()
-    assert violations == [], f"部分股票的逐日明細超過 60 日視窗上限: {violations}"
+def test_institutional_flow_daily_covers_about_three_years(conn):
+    """第五輪核心變更：institutional_flow_daily 從「近 60 個交易日」擴大為「近 3 年
+    （約 750 個交易日）」累積式時序表。用全表 MIN/MAX date 落差驗證涵蓋期間確實約 3 年
+    （允許來源端假日/個別缺漏，門檻抓 900 天，略低於 3*365=1095 天留緩衝）。"""
+    cur = conn.execute("SELECT MIN(date), MAX(date) FROM institutional_flow_daily")
+    min_date, max_date = cur.fetchone()
+    assert min_date is not None and max_date is not None
+    from datetime import date as _date
+    span_days = (_date.fromisoformat(max_date) - _date.fromisoformat(min_date)).days
+    assert span_days >= 900, f"institutional_flow_daily 涵蓋期間過短（{min_date} ~ {max_date}，{span_days} 天），backfill 可能未完整執行"
+
+
+def test_institutional_flow_daily_trading_day_count_sane(conn):
+    """每檔股票的交易日數應落在合理範圍：下限抓 100（避免只抓到一小段就被視為完整），
+    上限抓 800（略高於 target_trading_days=750，抓明顯異常膨脹，例如重複寫入 bug）。
+    個別股票可能因掛牌時間較晚、停牌等原因略低，不強制每檔都頂到 750。"""
+    cur = conn.execute("SELECT stock_id, COUNT(*) AS n FROM institutional_flow_daily GROUP BY stock_id")
+    rows = cur.fetchall()
+    assert rows, "institutional_flow_daily 沒有任何資料"
+    too_many = [(sid, n) for sid, n in rows if n > 800]
+    assert too_many == [], f"部分股票交易日數超出合理上限（疑似重複寫入 bug）: {too_many}"
+    median_n = sorted(n for _, n in rows)[len(rows) // 2]
+    assert median_n >= 100, f"多數股票的交易日數過少（中位數 {median_n}），backfill 可能尚未完整執行"
 
 
 def test_institutional_flow_tables_no_orphan_rows(conn):

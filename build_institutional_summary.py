@@ -1,38 +1,54 @@
-"""建置/刷新 `stock_groups` 名單股票的三大法人近期買賣超動態快照。
+"""建置/刷新 `stock_groups` 名單股票的三大法人動態：近 3 年逐日歷史 + 近 5/20/60 日彙總。
 
 資料源：TWSE `fund/T86`（上市）+ TPEx `3itrade_hedge_result.php`（上櫃），官方按日期查詢
-endpoint，逐日往回抓，直到湊滿 60 個實際交易日（`collectors/institutional_official.py`）。
-**不再讀取 `tw_cache/institutional.db`**（該共用資料源只涵蓋 tw-momentum-scanner 篩選過的
-696 檔動能股歷史清單，不是全市場，會讓 91 檔中固定有一批股票查無資料；改用官方 API 直抓
-可涵蓋全部 91 檔，且資料新鮮度一致，見 HANDOFF.md 決策紀錄）。
+endpoint（`collectors/institutional_official.py`），皆為「查一天、回全市場」，逐日往回抓
+才能湊歷史。
 
-兩個 endpoint 都是「查一天、回全市場」，不是逐檔查詢，所以 TWSE/TPEx 各自只需要約 60~90
-次請求（60 個交易日 + 假日跳過的額外嘗試），本地過濾出 91 檔目標股票即可，不對整個股票
-宇宙分檔打 API。務必用 `collectors/_http.py` 既有的節流機制（同 bucket 至少間隔
-`MIN_INTERVAL_SEC` 秒 + 403/429/5xx 自動退避重試）。
+**【第五輪】從「每次執行都整批重抓近 60 個交易日」改為「累積近 3 年（約 750 個交易日）
+的本地歷史 + 增量刷新」**：
+    - `institutional_flow_daily`（PK 不變 `(stock_id, date)`）現在是**累積式**時序表：
+      backfill 目標約 750 個交易日（近 3 年），首次執行會逐日往回抓到 750 個交易日或
+      撞到 3 年+緩衝的日曆日下限；之後重跑只需要抓「比本地資料庫目前最新日期更新」的
+      新增交易日（增量），不會每次都整批重抓 750 天。
+    - `institutional_flow_summary`（PK 不變 `stock_id`，近 5/20/60 日彙總 + streak）
+      計算邏輯不變，但資料來源改成**讀本地 `institutional_flow_daily`**（該表現在已有
+      近 3 年資料，绝对夠算 60 日彙總），不再對外多發送請求重複抓最近期資料。
+    - 用 `institutional_fetch_log` 表（PK `(market, date)`）記錄「這個市場+日期是否已經
+      查詢過」（含非交易日的空結果），讓增量判斷精確、不必用 `institutional_flow_daily`
+      裡『有沒有資料列』去猜測『這天有沒有查過』（兩者語意不同：查過但非交易日 vs 根本
+      沒查過）。
 
-本腳本輸出兩張表，schema 與第三輪（讀 institutional.db 版本）完全相同，皆為**快照覆蓋**
-（每次執行整批 DELETE + INSERT，不逐筆 upsert）：
-    - institutional_flow_summary：每檔股票一列，近 5/20/60 日三大法人累計買賣超 +
-      外資連續買/賣超天數（streak）
-    - institutional_flow_daily：近 60 個交易日逐日明細（供未來視覺化畫走勢圖用）
+**可續傳設計**：
+    - 逐日抓取的迴圈分成「往前補新交易日（forward）」與「往回補歷史交易日（backward）」
+      兩段，各自以 `institutional_fetch_log` 目前記錄的最新/最舊日期為起點接著抓，
+      不必每次從頭開始。
+    - 每抓完約 20 個交易日就 commit 一次（不是等全部 ~750×2 次請求都成功才寫入），
+      中途中斷重跑可以從資料庫現有進度接續。
+    - 單一交易日請求失敗（`_http.get()` 內建重試 3 次後仍失敗）記錄下來、跳過繼續下一天，
+      不讓整個 3 年 backfill 因為一次暫時性網路問題全部作廢；失敗的日期不會寫入
+      `institutional_fetch_log`，之後重跑本腳本會自動再嘗試（該日期落在 forward/backward
+      掃描範圍內的話）。
 
 用法：
-    python build_institutional_summary.py [--db-path PATH] [--start-date YYYY-MM-DD]
+    python build_institutional_summary.py [--db-path PATH] [--target-trading-days N]
 """
 from __future__ import annotations
 
 import argparse
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 
 from collectors import institutional_official as inst_api
+from models import CollectorError
 
 DEFAULT_DB_PATH = Path(__file__).parent / "data" / "tw_stocks.db"
 
-DETAIL_WINDOW_DAYS = 60      # institutional_flow_daily / 目標交易日數（不無限累積），也是抓取目標交易日數
-MAX_CALENDAR_DAYS = 150      # 往回查詢的日曆日安全上限（60 交易日 + 假日緩衝，避免無窮迴圈）
+SUMMARY_WINDOW_DAYS = 60          # institutional_flow_summary 近 5/20/60 日彙總的視窗上限（不變）
+TARGET_TRADING_DAYS = 750         # 近 3 年 backfill 目標交易日數（約 250 交易日/年 x 3）
+CALENDAR_FLOOR_DAYS = 3 * 366 + 60  # 往回查詢的日曆日絕對下限（3 年 + 緩衝，避免無窮迴圈）
+COMMIT_BATCH_TRADING_DAYS = 20    # 每湊滿 N 個交易日就 commit 一次
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS institutional_flow_summary (
@@ -45,11 +61,11 @@ CREATE TABLE IF NOT EXISTS institutional_flow_summary (
     trust_net_20d               INTEGER,
     trust_net_60d                INTEGER,
     dealer_net_5d               INTEGER,
-    dealer_net_20d              INTEGER,
+    dealer_net_20d               INTEGER,
     dealer_net_60d               INTEGER,
-    trading_days_covered       INTEGER,  -- 實際抓到的近期交易日數（<=60，反映資料涵蓋度，新股/資料缺口會 <60）
+    trading_days_covered       INTEGER,  -- 近期彙總實際涵蓋的交易日數（<=60，反映資料涵蓋度）
     foreign_streak_days        INTEGER,  -- 外資連續買/賣超天數（正=連續買超、負=連續賣超、0=無資料或最新一日打平）
-    foreign_streak_truncated   INTEGER,  -- 1 表示 streak 撞到 lookback 視窗上限，真實連續天數可能更長（下界值）
+    foreign_streak_truncated   INTEGER,  -- 1 表示 streak 撞到 60 日彙總視窗上限，真實連續天數可能更長（下界值）
     updated_at                 TEXT NOT NULL
 );
 
@@ -60,6 +76,17 @@ CREATE TABLE IF NOT EXISTS institutional_flow_daily (
     trust_net   INTEGER,
     dealer_net  INTEGER,
     PRIMARY KEY (stock_id, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_institutional_flow_daily_stock_date
+    ON institutional_flow_daily(stock_id, date DESC);
+
+CREATE TABLE IF NOT EXISTS institutional_fetch_log (
+    market     TEXT NOT NULL,   -- 'TWSE' / 'TPEx'
+    date       TEXT NOT NULL,
+    is_trading_day INTEGER NOT NULL,  -- 1=當天有資料（交易日），0=查過但無資料（非交易日）
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (market, date)
 );
 """
 
@@ -77,37 +104,161 @@ def _target_stocks(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     return cur.fetchall()
 
 
-def collect_market_history(
-    fetch_fn, target_ids: set[str], market_label: str,
-    start_date: date, target_trading_days: int = DETAIL_WINDOW_DAYS,
-    max_calendar_days: int = MAX_CALENDAR_DAYS,
-) -> dict[str, list[tuple[str, int | None, int | None, int | None]]]:
-    """逐日往回查詢官方 endpoint，直到湊滿 target_trading_days 個有效交易日或撞到
-    max_calendar_days 日曆日上限。空結果（非交易日）跳過，不視為錯誤。
+def _fetch_log_bounds(conn: sqlite3.Connection, market: str) -> tuple[str | None, str | None]:
+    cur = conn.execute(
+        "SELECT MIN(date), MAX(date) FROM institutional_fetch_log WHERE market = ?", (market,)
+    )
+    return cur.fetchone()
 
-    回傳 {stock_id: [(date, foreign_net, trust_net, dealer_net), ...]}，每檔股票的
-    list 依日期新到舊排序（因為迴圈本身就是從新到舊查詢）。只收錄 target_ids 內的股票，
-    本地過濾，不逐檔打 API。
-    """
-    collected: dict[str, list[tuple]] = {sid: [] for sid in target_ids}
-    trading_days = 0
-    d = start_date
-    checked = 0
-    while trading_days < target_trading_days and checked < max_calendar_days:
-        iso_date = d.isoformat()
+
+def _trading_days_logged(conn: sqlite3.Connection, market: str) -> int:
+    cur = conn.execute(
+        "SELECT COUNT(*) FROM institutional_fetch_log WHERE market = ? AND is_trading_day = 1",
+        (market,),
+    )
+    return cur.fetchone()[0]
+
+
+def _log_day(conn: sqlite3.Connection, market: str, iso_date: str, is_trading_day: bool) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO institutional_fetch_log (market, date, is_trading_day, checked_at) "
+        "VALUES (?, ?, ?, ?)",
+        (market, iso_date, int(is_trading_day), _now_iso()),
+    )
+
+
+def _fetch_day(fetch_fn, iso_date: str, target_ids: set[str]) -> tuple[bool, list[dict], str | None]:
+    """回傳 (成功與否, 過濾後的目標股票 rows, 失敗訊息)。成功但無資料（非交易日）回 (True, [], None)。"""
+    try:
         rows = fetch_fn(iso_date)
-        checked += 1
+    except CollectorError as e:
+        return False, [], str(e)
+    return True, [r for r in rows if r["stock_id"] in target_ids], None
+
+
+def backfill_market(
+    conn: sqlite3.Connection, fetch_fn, target_ids: set[str], market: str,
+    target_trading_days: int, floor_date: date, today: date,
+) -> tuple[int, list[str]]:
+    """對單一市場做增量 + 回補式 backfill。回傳 (本次新抓到的交易日數, 失敗日期清單)。
+
+    分兩段：
+      1) forward：從 fetch_log 目前記錄的最新日期之後一路補到今天（增量刷新新交易日）。
+      2) backward：從 fetch_log 目前記錄的最舊日期之前一路往回補，直到 fetch_log 累計
+         交易日數達到 target_trading_days，或撞到 floor_date 絕對下限。
+    每湊滿 COMMIT_BATCH_TRADING_DAYS 個交易日就 commit 一次；單日失敗記錄下來跳過繼續。
+    """
+    oldest, newest = _fetch_log_bounds(conn, market)
+    failed: list[str] = []
+    new_trading_days = 0
+    pending_since_commit = 0
+
+    def maybe_commit():
+        nonlocal pending_since_commit
+        if pending_since_commit >= COMMIT_BATCH_TRADING_DAYS:
+            conn.commit()
+            pending_since_commit = 0
+
+    def process_day(d: date) -> bool:
+        """回傳這天是否為有效交易日（成功查到資料）。"""
+        nonlocal new_trading_days, pending_since_commit
+        iso_date = d.isoformat()
+        ok, rows, err = _fetch_day(fetch_fn, iso_date, target_ids)
+        if not ok:
+            failed.append(f"{market} {iso_date}（{err}）")
+            return False
+        is_trading_day = len(rows) > 0
+        _log_day(conn, market, iso_date, is_trading_day)
         if rows:
-            trading_days += 1
-            print(f"  {market_label} 已抓 {trading_days}/{target_trading_days} 個交易日（{iso_date}）")
-            for r in rows:
-                sid = r["stock_id"]
-                if sid in collected:
-                    collected[sid].append((r["date"], r["foreign_net"], r["trust_net"], r["dealer_net"]))
+            conn.executemany(
+                "INSERT OR REPLACE INTO institutional_flow_daily "
+                "(stock_id, date, foreign_net, trust_net, dealer_net) VALUES (?, ?, ?, ?, ?)",
+                [(r["stock_id"], r["date"], r["foreign_net"], r["trust_net"], r["dealer_net"]) for r in rows],
+            )
+        if is_trading_day:
+            new_trading_days += 1
+            pending_since_commit += 1
+        return is_trading_day
+
+    # 1) forward：補新交易日（增量刷新，日常重跑主要走這段）
+    if newest is not None:
+        d = date.fromisoformat(newest) + timedelta(days=1)
+        forward_days = 0
+        while d <= today:
+            process_day(d)
+            forward_days += 1
+            maybe_commit()
+            d += timedelta(days=1)
+        if forward_days:
+            print(f"  {market} forward：檢查了 {forward_days} 個新日曆日（{date.fromisoformat(newest) + timedelta(days=1)} ~ {today}）")
+
+    # 2) backward：往回補歷史，直到湊滿 target_trading_days 或撞到 floor_date
+    oldest, newest = _fetch_log_bounds(conn, market)  # forward 段執行完後重新查一次
+    trading_days_total = _trading_days_logged(conn, market)
+    start_backward = (date.fromisoformat(oldest) - timedelta(days=1)) if oldest is not None else today
+    d = start_backward
+    checked_backward = 0
+    started = time.monotonic()
+    while trading_days_total < target_trading_days and d >= floor_date:
+        was_trading_day = process_day(d)
+        checked_backward += 1
+        if was_trading_day:
+            trading_days_total += 1
+            if trading_days_total % COMMIT_BATCH_TRADING_DAYS == 0:
+                elapsed = time.monotonic() - started
+                rate = trading_days_total / elapsed if elapsed > 0 else 0
+                remaining = target_trading_days - trading_days_total
+                eta_min = (remaining / rate / 60) if rate > 0 else float("nan")
+                print(f"  {market} 已累積 {trading_days_total}/{target_trading_days} 個交易日"
+                      f"（backward 掃到 {d.isoformat()}，本次已耗時 {elapsed/60:.1f} 分鐘，"
+                      f"預估剩餘 {eta_min:.1f} 分鐘）")
+        maybe_commit()
         d -= timedelta(days=1)
-    if trading_days < target_trading_days:
-        print(f"  {market_label} 警告：撞到 {max_calendar_days} 日曆日上限，只湊到 {trading_days} 個交易日")
-    return collected
+    conn.commit()
+
+    if trading_days_total < target_trading_days and d < floor_date:
+        print(f"  {market} 警告：撞到 {floor_date.isoformat()} 日曆日下限，只累積到 {trading_days_total} 個交易日")
+
+    return new_trading_days, failed
+
+
+def _summary_from_local(conn: sqlite3.Connection, target_ids: list[str]) -> tuple[list[dict], list[str]]:
+    """從本地 institutional_flow_daily 讀最近 <=60 筆算 5/20/60 日彙總 + streak，
+    不對外發送任何額外請求（第五輪核心變更：summary 改讀本地累積資料）。"""
+    now = _now_iso()
+    summary_rows: list[dict] = []
+    missing: list[str] = []
+
+    for stock_id in target_ids:
+        cur = conn.execute(
+            "SELECT date, foreign_net, trust_net, dealer_net FROM institutional_flow_daily "
+            "WHERE stock_id = ? ORDER BY date DESC LIMIT ?",
+            (stock_id, SUMMARY_WINDOW_DAYS),
+        )
+        rows = cur.fetchall()  # [(date, foreign_net, trust_net, dealer_net), ...] 新到舊
+        if not rows:
+            missing.append(f"{stock_id}（本地 institutional_flow_daily 查無資料）")
+            continue
+
+        streak_days, truncated = _foreign_streak(rows)
+        summary_rows.append({
+            "stock_id": stock_id,
+            "latest_date": rows[0][0],
+            "foreign_net_5d": _sum_net(rows, 1, 5),
+            "foreign_net_20d": _sum_net(rows, 1, 20),
+            "foreign_net_60d": _sum_net(rows, 1, 60),
+            "trust_net_5d": _sum_net(rows, 2, 5),
+            "trust_net_20d": _sum_net(rows, 2, 20),
+            "trust_net_60d": _sum_net(rows, 2, 60),
+            "dealer_net_5d": _sum_net(rows, 3, 5),
+            "dealer_net_20d": _sum_net(rows, 3, 20),
+            "dealer_net_60d": _sum_net(rows, 3, 60),
+            "trading_days_covered": min(len(rows), SUMMARY_WINDOW_DAYS),
+            "foreign_streak_days": streak_days,
+            "foreign_streak_truncated": int(truncated),
+            "updated_at": now,
+        })
+    return summary_rows, missing
 
 
 def _sum_net(rows: list[tuple], idx: int, n: int) -> int | None:
@@ -118,7 +269,9 @@ def _sum_net(rows: list[tuple], idx: int, n: int) -> int | None:
 
 
 def _foreign_streak(rows: list[tuple]) -> tuple[int, bool]:
-    """回傳 (streak_days, truncated)。正值=連續買超天數、負值=連續賣超天數、0=無資料或最新一日打平。"""
+    """回傳 (streak_days, truncated)。正值=連續買超天數、負值=連續賣超天數、0=無資料或最新一日打平。
+    truncated=1 表示 streak 撞到本次彙總視窗（最多 SUMMARY_WINDOW_DAYS 筆）上限，
+    真實連續天數可能更長（下界值），語意與第四輪相同，只是資料來源改為本地表。"""
     if not rows:
         return 0, False
     first_net = rows[0][1]
@@ -136,128 +289,98 @@ def _foreign_streak(rows: list[tuple]) -> tuple[int, bool]:
     return streak * direction, truncated
 
 
-def build_summary_and_daily_rows(
-    history: dict[str, list[tuple]],
-) -> tuple[list[dict], list[dict], list[str]]:
-    now = _now_iso()
-    summary_rows: list[dict] = []
-    daily_rows: list[dict] = []
-    missing: list[str] = []
-
-    for stock_id in sorted(history):
-        rows = history[stock_id]
-        if not rows:
-            missing.append(f"{stock_id}（官方 API 近 {MAX_CALENDAR_DAYS} 個日曆日內查無此代號的三大法人資料）")
-            continue
-
-        streak_days, truncated = _foreign_streak(rows)
-        summary_rows.append({
-            "stock_id": stock_id,
-            "latest_date": rows[0][0],
-            "foreign_net_5d": _sum_net(rows, 1, 5),
-            "foreign_net_20d": _sum_net(rows, 1, 20),
-            "foreign_net_60d": _sum_net(rows, 1, 60),
-            "trust_net_5d": _sum_net(rows, 2, 5),
-            "trust_net_20d": _sum_net(rows, 2, 20),
-            "trust_net_60d": _sum_net(rows, 2, 60),
-            "dealer_net_5d": _sum_net(rows, 3, 5),
-            "dealer_net_20d": _sum_net(rows, 3, 20),
-            "dealer_net_60d": _sum_net(rows, 3, 60),
-            "trading_days_covered": min(len(rows), DETAIL_WINDOW_DAYS),
-            "foreign_streak_days": streak_days,
-            "foreign_streak_truncated": int(truncated),
-            "updated_at": now,
-        })
-        for date_, foreign_net, trust_net, dealer_net in rows[:DETAIL_WINDOW_DAYS]:
-            daily_rows.append({
-                "stock_id": stock_id, "date": date_,
-                "foreign_net": foreign_net, "trust_net": trust_net, "dealer_net": dealer_net,
-            })
-    return summary_rows, daily_rows, missing
+def write_summary(conn: sqlite3.Connection, summary_rows: list[dict]) -> None:
+    with conn:
+        conn.execute("DELETE FROM institutional_flow_summary")
+        conn.executemany(
+            """
+            INSERT INTO institutional_flow_summary
+                (stock_id, latest_date, foreign_net_5d, foreign_net_20d, foreign_net_60d,
+                 trust_net_5d, trust_net_20d, trust_net_60d,
+                 dealer_net_5d, dealer_net_20d, dealer_net_60d,
+                 trading_days_covered, foreign_streak_days, foreign_streak_truncated, updated_at)
+            VALUES (:stock_id, :latest_date, :foreign_net_5d, :foreign_net_20d, :foreign_net_60d,
+                    :trust_net_5d, :trust_net_20d, :trust_net_60d,
+                    :dealer_net_5d, :dealer_net_20d, :dealer_net_60d,
+                    :trading_days_covered, :foreign_streak_days, :foreign_streak_truncated, :updated_at)
+            """,
+            summary_rows,
+        )
 
 
-def write_db(summary_rows: list[dict], daily_rows: list[dict], db_path: Path) -> None:
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.executescript(SCHEMA_SQL)
-        with conn:
-            conn.execute("DELETE FROM institutional_flow_summary")
-            conn.execute("DELETE FROM institutional_flow_daily")
-            conn.executemany(
-                """
-                INSERT INTO institutional_flow_summary
-                    (stock_id, latest_date, foreign_net_5d, foreign_net_20d, foreign_net_60d,
-                     trust_net_5d, trust_net_20d, trust_net_60d,
-                     dealer_net_5d, dealer_net_20d, dealer_net_60d,
-                     trading_days_covered, foreign_streak_days, foreign_streak_truncated, updated_at)
-                VALUES (:stock_id, :latest_date, :foreign_net_5d, :foreign_net_20d, :foreign_net_60d,
-                        :trust_net_5d, :trust_net_20d, :trust_net_60d,
-                        :dealer_net_5d, :dealer_net_20d, :dealer_net_60d,
-                        :trading_days_covered, :foreign_streak_days, :foreign_streak_truncated, :updated_at)
-                """,
-                summary_rows,
-            )
-            if daily_rows:
-                conn.executemany(
-                    """
-                    INSERT INTO institutional_flow_daily (stock_id, date, foreign_net, trust_net, dealer_net)
-                    VALUES (:stock_id, :date, :foreign_net, :trust_net, :dealer_net)
-                    """,
-                    daily_rows,
-                )
-    finally:
-        conn.close()
-
-
-def build(db_path: Path, start_date: date | None = None) -> None:
+def build(db_path: Path, target_trading_days: int = TARGET_TRADING_DAYS) -> None:
     if not db_path.exists():
         raise SystemExit(f"{db_path} 不存在，請先跑: python build_db.py")
 
+    started = time.monotonic()
     conn = sqlite3.connect(db_path)
     try:
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+
         targets = _target_stocks(conn)
+        if not targets:
+            raise SystemExit("stock_groups 目前沒有任何股票，先確認 build_db.py 已建置族群資料")
+
+        twse_ids = {sid for sid, market in targets if market == "TWSE"}
+        tpex_ids = {sid for sid, market in targets if market == "TPEx"}
+        unknown_market = [f"{sid}（未知市場別 {market}）" for sid, market in targets if market not in ("TWSE", "TPEx")]
+
+        today = date.today()
+        floor_date = today - timedelta(days=CALENDAR_FLOOR_DAYS)
+        print(f"目標股票：{len(targets)} 檔（TWSE {len(twse_ids)} / TPEx {len(tpex_ids)}），"
+              f"backfill 目標 {target_trading_days} 個交易日（約 3 年），日曆日下限 {floor_date.isoformat()}")
+
+        print("\n=== TWSE 三大法人買賣超（fund/T86，增量 + 回補近 3 年）===")
+        twse_new, twse_failed = backfill_market(conn, inst_api.fetch_twse_t86, twse_ids, "TWSE",
+                                                  target_trading_days, floor_date, today)
+
+        print("\n=== TPEx 三大法人買賣超（3itrade_hedge_result.php，增量 + 回補近 3 年）===")
+        tpex_new, tpex_failed = backfill_market(conn, inst_api.fetch_tpex_hedge, tpex_ids, "TPEx",
+                                                  target_trading_days, floor_date, today)
+
+        failed = twse_failed + tpex_failed + unknown_market
+
+        print("\n=== 從本地 institutional_flow_daily 計算 institutional_flow_summary（不額外打網路請求）===")
+        target_ids_sorted = sorted(twse_ids | tpex_ids)
+        summary_rows, missing_summary = _summary_from_local(conn, target_ids_sorted)
+        write_summary(conn, summary_rows)
+        conn.commit()
+
+        twse_total = _trading_days_logged(conn, "TWSE")
+        tpex_total = _trading_days_logged(conn, "TPEx")
+        cur = conn.execute("SELECT MIN(date), MAX(date), COUNT(*) FROM institutional_flow_daily")
+        min_date, max_date, total_daily_rows = cur.fetchone()
+
+        elapsed_total = time.monotonic() - started
+        print(f"\n本次新抓交易日：TWSE +{twse_new}、TPEx +{tpex_new}；"
+              f"本地累積交易日：TWSE {twse_total}、TPEx {tpex_total}")
+        print(f"institutional_flow_daily：{total_daily_rows} 列，涵蓋 {min_date} ~ {max_date}")
+        print(f"institutional_flow_summary：目標 {len(targets)} 檔，涵蓋 {len(summary_rows)} 檔，"
+              f"缺資料 {len(missing_summary)} 檔")
+        if missing_summary:
+            print("summary 缺資料清單：")
+            for m in sorted(missing_summary):
+                print(f"  - {m}")
+        if failed:
+            print(f"\n本次執行有 {len(failed)} 個「市場+日期」抓取失敗（重試 3 次仍失敗，已跳過，"
+                  f"之後重跑本腳本會自動補抓）：")
+            for f in failed:
+                print(f"  - {f}")
+        print(f"\n總耗時 {elapsed_total/60:.1f} 分鐘，寫入完成: {db_path}")
     finally:
         conn.close()
-    if not targets:
-        raise SystemExit("stock_groups 目前沒有任何股票，先確認 build_db.py 已建置族群資料")
-
-    twse_ids = {sid for sid, market in targets if market == "TWSE"}
-    tpex_ids = {sid for sid, market in targets if market == "TPEx"}
-    unknown_market = [f"{sid}（未知市場別 {market}）" for sid, market in targets if market not in ("TWSE", "TPEx")]
-
-    start = start_date or date.today()
-    print(f"目標股票：{len(targets)} 檔（TWSE {len(twse_ids)} / TPEx {len(tpex_ids)}），查詢起點 {start.isoformat()}")
-
-    print("\n=== 抓取 TWSE 三大法人買賣超（fund/T86，逐日往回）===")
-    twse_history = collect_market_history(inst_api.fetch_twse_t86, twse_ids, "TWSE", start)
-
-    print("\n=== 抓取 TPEx 三大法人買賣超（3itrade_hedge_result.php，逐日往回）===")
-    tpex_history = collect_market_history(inst_api.fetch_tpex_hedge, tpex_ids, "TPEx", start)
-
-    history: dict[str, list[tuple]] = {**twse_history, **tpex_history}
-    summary_rows, daily_rows, missing = build_summary_and_daily_rows(history)
-    missing.extend(unknown_market)
-
-    write_db(summary_rows, daily_rows, db_path)
-
-    print(f"\n目標股票 {len(targets)} 檔，涵蓋 {len(summary_rows)} 檔，缺資料 {len(missing)} 檔")
-    if missing:
-        print("缺資料清單：")
-        for m in sorted(missing):
-            print(f"  - {m}")
-    print(f"寫入完成: {db_path}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="建置/刷新 stock_groups 名單的三大法人近期買賣超動態快照（官方 API 直抓）")
+    parser = argparse.ArgumentParser(description="建置/刷新 stock_groups 名單股票的三大法人近 3 年歷史 + 近期彙總（官方 API 直抓，增量可續傳）")
     parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
     parser.add_argument(
-        "--start-date", type=str, default=None,
-        help="往回查詢的起始日期 YYYY-MM-DD（預設今天，主要供測試/回補特定區間使用）",
+        "--target-trading-days", type=int, default=TARGET_TRADING_DAYS,
+        help=f"backfill 目標交易日數（預設 {TARGET_TRADING_DAYS}，約 3 年）",
     )
     args = parser.parse_args()
-    start_date = date.fromisoformat(args.start_date) if args.start_date else None
-    build(args.db_path, start_date)
+    build(args.db_path, args.target_trading_days)
 
 
 if __name__ == "__main__":

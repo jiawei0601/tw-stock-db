@@ -2,8 +2,8 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-16（第四輪：三大法人動態改用官方 API 直抓，取代
-  `tw_cache/institutional.db` 依賴，91 檔全數涵蓋）
+- 最後更新：Claude Code @ 2026-07-16（第五輪：月營收 + 三大法人動態從「只有最新一期」
+  擴充為「近 3 年歷史」，詳見下方第五輪紀錄）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
@@ -78,23 +78,75 @@
       導致長迴圈中途整個腳本失敗，修正後 `ConnectionError` 與 `Timeout` 一樣視為
       retriable、走相同的 5/20/60 秒退避重試。這是本輪任務發現的真實 bug，不是
       臆測性修改。
-- 進行中（做到哪一步）：無，第四輪任務範圍內的項目已全部完成。
+  - **【第五輪】月營收 + 三大法人動態從「只有最新一期」擴充為「近 3 年歷史」**（範圍：
+    僅 `SELECT DISTINCT stock_id FROM stock_groups` 這 91 檔，動態查詢不寫死清單）：
+    - **月營收近 3 年歷史**（`monthly_revenue` 表）：新增 `collectors/revenue_history.py`
+      （MOPS 歷史封存頁面 `mopsov.twse.com.tw/nas/t21/{sii,otc}/t21sc03_{roc_year}_{month}_0.html`，
+      HTML 格式，須 `cp950` 解碼）+ `build_revenue_history.py`（新腳本，取代
+      `build_fundamentals.py` 原本的月營收部分）。**Schema 破壞性異動**：PK 從
+      `stock_id`（單列快照）改為 `(stock_id, ym)`（時序表），首次執行自動偵測舊 schema
+      並 DROP 重建（backfill 本來就會把最新一期含在 36 個月範圍內，不遺失資訊）。
+      可續傳設計：`revenue_fetch_log` 表（PK `(source_market, ym)`）記錄已抓過的
+      「市場+年月」，重跑跳過已抓月份（最近 2 個月每次強制重抓），單月失敗跳過繼續、
+      不中止整體 backfill，每抓完一個月立即寫入（不是等 72 頁全部成功才寫入）。
+      **實測結果：36 個月目標，實際涵蓋 35 個不同年月**（`2023-08` ~ `2026-07`，
+      2026-07 尚未公告屬預期），**91 檔目標中 88 檔有資料**（3 檔 `-KY` 外國發行人
+      股票 `3665`／`3673`／`4977` 在這個封存系列裡系統性查無資料，經跨 6 個不同月份
+      交叉驗證確認不是 parsing bug，見 `docs/data-sources.md` 第 13 節），
+      2330 台積電 34/35 個月有資料。首次全量 backfill 實測耗時 2.0 分鐘（72 次請求），
+      零失敗。
+    - **三大法人動態近 3 年歷史**（`institutional_flow_daily` 表）：沿用第四輪的
+      `collectors/institutional_official.py`（不用改），改寫 `build_institutional_summary.py`
+      的抓取策略：從「每次整批重抓近 60 個交易日」改為「累積近 3 年（750 個交易日）+
+      增量刷新」。新增 `institutional_fetch_log` 表（PK `(market, date)`）記錄已查過的
+      「市場+日期」（含非交易日的空結果），讓程式精確判斷該不該重抓，不必靠
+      `institutional_flow_daily` 有沒有那一列去猜測。`institutional_flow_summary`
+      （5/20/60 日彙總 + streak）計算邏輯完全不變，但資料來源改成讀本地
+      `institutional_flow_daily`（不再對外重複發送請求）。每湊滿 20 個交易日 commit
+      一次、單日失敗跳過繼續不中止整體 backfill。**實測結果：TWSE/TPEx 各 750/750
+      個交易日全數抓齊，`institutional_flow_daily` 共 67,764 列，涵蓋期間
+      `2023-06-12` ~ `2026-07-15`（約 3.1 年），`institutional_flow_summary` 91/91
+      全數涵蓋，零失敗**。首次全量 backfill 實測耗時 66.8 分鐘（750 交易日 x 2 市場
+      節流過的請求，符合預期的 45-90 分鐘長跑範圍）；驗證過重跑時的增量行為
+      （只抓新交易日，數秒內完成）與中途擴大 target 的續傳行為（從上次停下的地方繼續
+      往回補，不重複抓已有範圍）皆正確。
+    - **過程中發現並修正兩個真實 bug**（皆記錄在 `docs/data-sources.md` 第 13 節）：
+      (1) MOPS 封存頁面 row-parsing regex 若在 `[^<]*` 前多加一個 `\s*` 去吃數字前導
+      空白，會在近 44 萬字元的單行 HTML 上觸發**災難性回溯**，直接掛住（不是效能慢，
+      是實質上跑不完）；(2) 該頁面「備註」欄位的 `<td>` alignment 在備註為空時是
+      `align=center`、有實際文字時是 `align=left`，只比對 `align=center` 會讓所有
+      「有備註的公司」整列被靜默漏掉——第一次實測時 TWSE 2026-06 頁面因此漏掉 233 筆，
+      其中包含 2330 台積電本人，直到拿已知標的核對才發現。
+    - `tests/test_fundamentals_content.py` 更新：monthly_revenue 相關測試改為驗證
+      「涵蓋月數」「2330 筆數」「PK 為複合鍵」而非「總列數」；institutional_flow_daily
+      新增「涵蓋期間約 3 年」「單檔交易日數落在合理區間（100~800）」測試，取代舊版
+      「不超過 60 天」的測試（語意已改變）。全專案測試共 28 個，全綠。
+    - `AGENTS.md` 更新架構圖與 Interface Contract 反映 schema 異動；新增
+      `build_revenue_history.py` 使用說明；`build_institutional_summary.py` 說明改為
+      「增量 + 回補式」而非「單次抓 60 天」。
+- 進行中（做到哪一步）：無，第五輪任務範圍內的項目已全部完成。
 - 下一步（下一個任務，非本次範圍）：
   1. **持續補充族群/概念股**：`stock_groups` 是人工整理/使用者提供資料，非官方來源，
      之後有新的族群清單可比照同樣模式（核對代號後 `INSERT OR REPLACE`）繼續累積，
-     不需改 schema。`build_fundamentals.py`/`build_institutional_summary.py` 都是動態
-     查詢 `stock_groups`，族群名單擴充後直接重跑即可自動涵蓋新股票，不需改程式。
+     不需改 schema。`build_revenue_history.py`/`build_fundamentals.py`/
+     `build_institutional_summary.py` 都是動態查詢 `stock_groups`，族群名單擴充後
+     直接重跑即可自動涵蓋新股票，不需改程式（但新股票首次加入時月營收/三大法人動態
+     都要重新 backfill 近 3 年歷史，會產生跟第一次 backfill 同等級的請求量與耗時，
+     不是免費的）。
   2. **視覺化網頁**：讀 `data/tw_stocks.db` 的 `stocks` + `stock_groups` +
-     `monthly_revenue` + `shareholding_concentration` + `institutional_flow_summary`/
-     `institutional_flow_daily` 做「資金流向依板塊/族群」儀表板。四輪任務都完全沒有
-     動這塊。
-  3. （可選）**定期刷新排程**：目前三個資料庫產出都是單次快照，若要保持最新，需要排程
-     重跑 `python build_db.py` + `python build_fundamentals.py` +
-     `python build_institutional_summary.py`（比照 tw-momentum-scanner 用 Windows
-     排程或 cron）。本次未設定。注意：三個 build 腳本互不覆寫彼此的表，可任意順序/
-     頻率重跑；但 `build_institutional_summary.py` 第四輪起改成官方 API 直抓，單次
-     執行約需 4-6 分鐘（每次重跑都是完整的 60 交易日 x 2 市場逐日查詢，沒有增量抓取，
-     若排程頻率提高到每日一次，屬合理用量，不建議抓更頻繁避免對官方站台造成不必要負擔）。
+     `monthly_revenue`（近 3 年時序）+ `shareholding_concentration` +
+     `institutional_flow_summary`/`institutional_flow_daily`（近 3 年時序）做
+     「資金流向依板塊/族群」儀表板。五輪任務都完全沒有動這塊，現在兩個維度都已經有
+     真正的歷史資料可以畫趨勢圖/走勢圖了。
+  3. **定期刷新排程**：`build_db.py` 與 `build_fundamentals.py`（籌碼集中度）仍是
+     整批快照覆蓋，可任意頻率重跑。`build_revenue_history.py` 與
+     `build_institutional_summary.py` 第五輪起都已改成增量式，重跑成本低（前者最近
+     2 個月強制重抓 + 新月份自動涵蓋、後者只抓比本地最新日期更新的新交易日），
+     **建議排程每日跑一次**（比照 tw-momentum-scanner 用 Windows 排程或 cron），
+     每日增量成本：月營收約數秒（除非剛好是新月份第一次公告當天才會抓多一點）、
+     三大法人約數十秒（1~2 個新交易日 x 2 市場）。**首次歷史 backfill 已經在本輪
+     做完，之後不需要再手動觸發長跑**，除非未來擴大 `stock_groups` 名單（見上方第 1
+     點）或想拉長歷史視窗（改 `--target-trading-days`/`--months` 參數）。
 - 關鍵決策 + 為什麼：
   - **主要產業別來源用 ISIN HTML 頁面而非 TWSE OpenAPI JSON**：OpenAPI
     (`t187ap03_L`/`mopsfin_t187ap03_O`) 的產業別欄位只有兩碼數字代碼（如 "24"），
@@ -197,17 +249,53 @@
     是空 list 才代表「當天無交易」。這跟同一輪任務用到的 TWSE T86（`stat != 'OK'`
     才代表無交易）行為不同，兩個 endpoint 的「非交易日」判斷邏輯**不能共用同一套邏輯**，
     `collectors/institutional_official.py` 的兩個 fetch 函式分別用各自正確的判斷方式。
-  - **【第四輪】`build_institutional_summary.py` 單次執行約需 4-6 分鐘**（TWSE/TPEx
-    各約 60~90 次節流過的請求，`MIN_INTERVAL_SEC=1.7` 秒/請求），比第三輪讀本地
-    SQLite（幾乎瞬間完成）慢很多，這是官方 API 直抓的必然代價，不要誤以為卡住了；
-    執行時會即時印出「TWSE/TPEx 已抓 N/60 個交易日」進度，可用來確認沒有卡死。
+  - **【第四輪，已隨第五輪擴大範圍，僅供歷史考證】** `build_institutional_summary.py`
+    第四輪版本單次執行約需 4-6 分鐘（只抓近 60 交易日）；**第五輪起改成近 3 年
+    backfill，首次全量執行約需 60-70 分鐘**（見下方第五輪雷區），日常增量重跑則回到
+    數十秒等級。
+  - **【第五輪】MOPS 歷史封存頁面 row-parsing regex 絕對不要用 `\s*` 去吃數字前導
+    空白**：`\s*` 跟緊接在後、同樣會吃空白的 `[^<]*` 對同一段空白有歧義的多種切法，
+    在近 44 萬字元的單行 HTML 上會觸發災難性回溯（catastrophic backtracking），
+    實測直接掛住、`timeout 20s` 都跑不完，且沒有任何錯誤訊息（看起來像網路卡住，
+    其實是 CPU 在原地回溯）。修法：`[^<]*` 本身就會吃空白，取值後 `.strip()` 即可。
+    見 `docs/data-sources.md` 第 13 節、`collectors/revenue_history.py` 的註解。
+  - **【第五輪】MOPS 歷史封存頁面「備註」欄位的 `<td>` alignment 會隨備註內容改變**：
+    備註為空（`-`）時是 `align=center`，有實際文字時變成 `align=left`。只比對
+    `align=center` 會讓「有備註的公司」整列被靜默漏掉且不報錯——第一次實測時 TWSE
+    2026-06 頁面因此漏掉 233 筆（含 2330 台積電本人），直到拿已知標的核對數字才發現。
+    這是本專案目前為止最隱蔽的一個 bug：regex 語法完全正確、能執行、有輸出，只是
+    悄悄漏資料。教訓：**新的 HTML parser 寫完後務必用至少一個已知標的（例如 2330）
+    交叉核對抓到的資料是否存在、數字是否合理，不能只看「有沒有噴例外」**。
+  - **【第五輪】`institutional_flow_daily`/`institutional_fetch_log` 長跑 backfill
+    期間不要同時對同一個 `data/tw_stocks.db` 跑其他 build 腳本**：Python `sqlite3`
+    對 DML 語句預設開隱式 transaction 直到明確 `commit()`，本專案 backfill 每湊滿
+    20 個交易日才 commit 一次，這段期間內其他腳本嘗試寫入同一個 db 檔案會拿到
+    `sqlite3.OperationalError: database is locked`（本專案實測時真的撞到，是在
+    backfill 跑到一半手動測試 `build_fundamentals.py` 時發現的）。不是 bug，是
+    SQLite 單寫入者限制，行為上排隊等待即可。
+  - **【第五輪】3 檔 `-KY` 外國發行人股票（`3665`／`3673`／`4977`）在 MOPS 歷史封存
+    頁面系列裡系統性查無資料**，但 `collectors/revenue.py` 用的 opendata
+    （`t187ap05_L`）同一時間點卻查得到這 3 檔的最新一期。合理推測是 MOPS 對外國發行人
+    另有獨立的月營收彙總報表系列（IFRS 申報路徑不同），本專案未進一步深究替代 URL，
+    如實記錄成已知缺口，見 `docs/data-sources.md` 第 13 節。
+  - **【第五輪】TWSE 2025-10（114年10月）archive 頁面回應 HTTP 200 但 body 完全是
+    0 bytes**，跟其他「查無資料」月份（會回約 871 bytes、內文含「查無資料」字樣）
+    不同，重試 3 次結果一致，判斷是該站台這個月資料的已知缺口，不是暫時性網路問題，
+    也不是 parsing bug。`monthly_revenue` 因此只涵蓋 35/36 個目標月份，屬預期落差。
 - 怎麼跑 / 怎麼測：
   ```bash
   cd C:\CLAUDE\investing\tw-stock-db
   pip install -r requirements.txt
   python build_db.py                       # 整批刷新 stocks + stock_groups
-  python build_fundamentals.py             # 91 檔月營收 + 籌碼集中度快照
-  python build_institutional_summary.py    # 91 檔三大法人近期動態快照（TWSE T86 + TPEx
-                                            # hedge_result.php 官方 API 逐日直抓，約 4-6 分鐘）
-  python -m pytest tests/ -q               # 驗證資料庫內容（25 個測試）
+  python build_revenue_history.py          # 91 檔月營收近 3 年歷史（首次全量約 2 分鐘，
+                                            # 之後重跑增量，數秒~數十秒）
+  python build_fundamentals.py             # 91 檔籌碼集中度快照
+  python build_institutional_summary.py    # 91 檔三大法人近 3 年歷史 + 近期彙總（TWSE T86
+                                            # + TPEx hedge_result.php 官方 API，首次全量約
+                                            # 60-70 分鐘，之後重跑增量，數十秒內完成；
+                                            # 中途中斷可直接重跑，會從資料庫現有進度接續）
+  python -m pytest tests/ -q               # 驗證資料庫內容（28 個測試）
   ```
+  **注意**：`build_revenue_history.py` 與 `build_institutional_summary.py` 都不要跟
+  其他 build 腳本同時併發執行（見上方 SQLite 單寫入者雷區）；四個 build 腳本本身
+  彼此獨立，依序（或任意非併發順序）重跑都安全。
