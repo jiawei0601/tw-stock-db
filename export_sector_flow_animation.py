@@ -44,6 +44,12 @@ _TEMPLATE = """<!DOCTYPE html>
 <div style="position:relative;width:100%;height:560px;">
   <canvas id="raceChart"></canvas>
 </div>
+<div style="display:flex;gap:24px;margin-top:8px;padding-top:12px;border-top:1px solid #ddd;font-size:14px;">
+  <span>淨流入合計：<b id="sumIn" style="color:#186bb5;"></b> 億股</span>
+  <span>淨流出合計：<b id="sumOut" style="color:#b5401e;"></b> 億股</span>
+  <span>淨額：<b id="sumNet"></b> 億股</span>
+</div>
+<p style="font-size:12px;color:#888;margin-top:4px;">合計為圖上顯示的 {top_n} 個板塊加總，非全市場 34 個板塊。</p>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
 const DATA = {data_json};
@@ -77,6 +83,9 @@ const slider = document.getElementById('weekSlider');
 const label = document.getElementById('weekLabel');
 const playBtn = document.getElementById('playBtn');
 const speedSel = document.getElementById('speedSel');
+const sumInEl = document.getElementById('sumIn');
+const sumOutEl = document.getElementById('sumOut');
+const sumNetEl = document.getElementById('sumNet');
 let playing = false;
 let timer = null;
 
@@ -87,6 +96,12 @@ function renderWeek(i) {{
   chart.update();
   label.textContent = wk.s + ' ~ ' + wk.e + '（第 ' + (i + 1) + ' / ' + DATA.weeks.length + ' 週）';
   slider.value = i;
+
+  const sumIn = wk.v.filter(v => v > 0).reduce((a, b) => a + b, 0);
+  const sumOut = wk.v.filter(v => v < 0).reduce((a, b) => a + b, 0);
+  sumInEl.textContent = '+' + sumIn.toFixed(1);
+  sumOutEl.textContent = sumOut.toFixed(1);
+  sumNetEl.textContent = (sumIn + sumOut >= 0 ? '+' : '') + (sumIn + sumOut).toFixed(1);
 }}
 
 function stepForward() {{
@@ -147,7 +162,9 @@ def export(db_path: Path, out_path: Path, top_n: int) -> dict:
         x_min = int(raw_min) - 1
         x_max = int(raw_max) + 1
 
-        html = _TEMPLATE.format(data_json=data_json, max_week=len(out_weeks) - 1, x_min=x_min, x_max=x_max)
+        html = _TEMPLATE.format(
+            data_json=data_json, max_week=len(out_weeks) - 1, x_min=x_min, x_max=x_max, top_n=len(sectors),
+        )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(html, encoding="utf-8")
 

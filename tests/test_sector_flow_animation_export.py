@@ -51,6 +51,15 @@ def test_export_selects_most_active_sectors(exported):
     assert "金融保險業" in exported["sectors"]
 
 
+def test_export_has_inflow_outflow_summary_elements(exported_html):
+    """底部淨流入/淨流出/淨額合計列必須存在，且有註明合計範圍只是圖上的 top-N 板塊
+    （不是全市場），避免使用者誤以為是全市場總計。"""
+    assert 'id="sumIn"' in exported_html
+    assert 'id="sumOut"' in exported_html
+    assert 'id="sumNet"' in exported_html
+    assert "非全市場" in exported_html
+
+
 def test_export_x_axis_is_fixed_not_auto_scaling(exported_html, exported):
     """x 軸 min/max 必須是固定數字寫死在 Chart.js options 裡，不能讓 Chart.js 每週
     自動依當週資料縮放——否則 0 軸的像素位置會隨每週數值大小左右跑動，動畫會很難看懂。
