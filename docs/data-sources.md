@@ -468,3 +468,101 @@ log`／`institutional_flow_summary`）後整個重新 backfill，不嘗試「補
   多個交易日（不是單日異常尖峰），且與本專案全程觀察到的 AI/半導體資金大量湧入
   現象（2330 台積電月營收年增率 67%、半導體業三年法人淨流入全板塊最高）相符，
   判斷是真實資料，將測試上限放寬到 100,000（而非直接刪測試或縮小驗證範圍）。
+
+---
+
+# 第九輪：三大法人資金流向「股數→金額」換算（2026-07-16 實測）
+
+使用者發現 `sector-flow-weekly-animation.html` 有些週三大法人淨額是負的但 TAIEX 卻上漲，
+根本原因是單位不對等：`institutional_flow_daily`/`sector_flow_daily`/`sector_flow_weekly`
+存的是「買賣超股數」，跟市值加權的 TAIEX 指數不能直接比較。本輪新增「股數 x 收盤價 ≈
+新台幣金額」換算所需的歷史收盤價資料源（`collectors/prices.py`），TWSE 沿用跟三大法人
+T86 同一個「查一天、回全市場」endpoint 家族，TPEx 則排查出兩個陷阱端點後才找到真正
+支援歷史查詢的來源，過程記錄如下。
+
+## 20. TWSE 個股歷史日收盤價 MI_INDEX（2026-07-16 實測）
+
+- URL：`https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date=YYYYMMDD&type=ALLBUT0999&response=json`
+  （跟 `collectors/institutional_official.py` 的 T86 是同一個「查一天、回全市場」endpoint
+  家族，`date` 為西元年）。
+- 需要瀏覽器 UA。**編碼陷阱跟 T86 相同**：`Content-Type` 宣告 `charset=UTF-8`，但
+  `resp.json()`/requests 自動編碼偵測不可靠，須用 `resp.content.decode('utf-8')` 手動
+  解碼再 `json.loads()`（實測用 Windows 終端機直接印出解碼結果會看到亂碼，但那是終端機
+  本身的顯示編碼問題，不是資料本身錯——用 `ord()` 檢查字元碼點確認解碼後的 Python
+  字串內容其實完全正確，這是本輪任務排查時特別留意到、值得記錄的一個「看起來像 bug
+  但其實不是」的陷阱，別被終端機顯示誤導）。
+- 回應是**多表格**結構（`tables` 陣列，實測固定 10 個表格：漲跌百分比限制的三個分類、
+  暫停交易個股等），個股收盤價在 `fields` 包含 `證券代號`、`收盤價` 的表格（實測固定是
+  `tables[8]`，但 `collectors/prices.py::fetch_twse_close` 用欄位名稱動態尋找該表格、
+  不寫死索引，避免 TWSE 未來調整表格順序就整個抓錯）。
+- 欄位（實測樣本，`tables[8]['fields']`）：`證券代號`、`證券名稱`、`成交股數`、
+  `成交筆數`、`成交金額`、`開盤價`、`最高價`、`最低價`、`收盤價`（本專案只取這欄）、
+  `漲跌(+/-)`、`漲跌價差`、`最後揭示買價`、`最後揭示買量`、`最後揭示賣價`、
+  `最後揭示賣量`、`本益比`。
+- **實測樣本核對（2330 台積電，2024-06-03）**：`收盤價=846.00`，跟使用者原始需求描述
+  裡提到的已知值完全一致，確認欄位對應無誤，非用猜的。同時實測 `date=20241202` 得
+  `1035.00`、`date=20250115` 得 `1065.00`，三個不同日期得到三個不同真實股價，證實這是
+  真正的歷史查詢，不是只回最新一天。
+- **非交易日**：跟 T86 同一套判斷方式，`stat` != `'OK'`（實測 `2024-06-09`〔週日〕回
+  `"很抱歉，沒有符合條件的資料!"`，`tables` 為 `None`），回空 list，不是錯誤。
+- 實測 2024-06-03 全市場個股收盤價表格共 1230 筆（涵蓋一般股票、ETF 等各類證券），
+  呼叫端需自行用 stock_id 白名單過濾（比照 T86/hedge_result 的既有模式）。
+
+## 21. TPEx 個股歷史日收盤價（2026-07-16 排查，最終找到可用來源）
+
+TPEx 的「歷史個股收盤價」比 TWSE 曲折，排查過程記錄如下（含踩過的陷阱），供未來
+如果 TPEx 又改版時參考排查方法：
+
+**陷阱 1：`openapi/v1/tpex_mainboard_daily_close_quotes`（openapi，`d` 為民國年）**
+- URL：`https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes?l=zh-tw&d={roc_date}&s=0,asc,0`
+- 實測不管 `d` 參數帶什麼日期（試過 `1130603`、`1140603`、`1150101` 三個不同日期），
+  回應裡的 `Date` 欄位**永遠固定回查詢當下的最新一天**（實測當下皆回 `"1150716"`），
+  資料本身也完全相同（同一份 10088 筆快照），確認這個 endpoint **完全不支援歷史查詢**，
+  只是一個「最新快照」endpoint，`d` 參數被忽略。
+
+**陷阱 2：`web/stock/aftertrading/daily_close_quotes/stk_quote_result.php`（舊版網頁 API，`d` 為民國年斜線）**
+- URL：`https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?d=民國年/MM/DD&se=EW`
+- 這是本專案先前任務就已知會踩雷的端點（見使用者需求描述），實測確認：不管 `d` 帶
+  `113/06/03` 還是 `114/12/02`，回應頂層 `date` 欄位一樣**永遠固定回查詢當下的日期**
+  （實測皆回 `"20260716"`），跟陷阱 1 是同一種「快照 endpoint、日期參數被忽略」的
+  設計，只是換一種 URL 風格包裝，本質相同的陷阱。
+
+**找到的可用來源：`www/zh-tw/afterTrading/dailyQuotes`（TPEx 網站改版後的新版頁面 API，`date` 為西元年斜線）**
+- URL：`https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes?date=YYYY/MM/DD&response=json`
+- **排查方法**：陷阱 1、2 都是 TPEx 舊版網站（`openapi/`、`web/stock/...`）的端點，
+  TPEx 近年已把官網重構為 `www/zh-tw/...` 路徑的新版前端（`collectors/institutional_
+  official.py` 用到的 `3itrade_hedge_result.php` 仍是舊版路徑但本身支援歷史查詢，
+  不能一概而論）。本輪從第三方開源專案 `chunkai1312/node-twstock`（GitHub，MIT
+  授權的台股資料抓取函式庫）的原始碼 `src/scrapers/tpex-scraper.ts` 找到這個新版
+  endpoint 的呼叫方式作為線索，再用本專案自己的請求邏輯（節流+瀏覽器 UA）獨立實測
+  驗證，不是直接信任第三方程式碼、也沒有依賴該函式庫本身（本專案不新增任何第三方
+  npm/pip 依賴，只是拿它的原始碼當「這個 endpoint 可能存在」的線索去源頭驗證）。
+- **關鍵陷阱：`date` 參數格式是西元年斜線 `YYYY/MM/DD`**，跟本專案其餘 TPEx endpoint
+  （`3itrade_hedge_result.php` 用民國年斜線 `YYY/MM/DD`）不同，如果沿用民國年格式
+  去查會查到完全不同（且可能不存在）的日期，這是本專案目前唯一一個用西元年格式的
+  TPEx endpoint，容易因為「複製其他 TPEx collector 的民國年轉換邏輯」而查錯，
+  `collectors/prices.py::fetch_tpex_close` 已用清楚註解標註此陷阱。
+- **實測樣本核對（3105 穩懋）**：`date=2024/06/03` 收盤 140.50、`date=2024/12/02`
+  收盤 117.50、`date=2025/01/15` 收盤 97.20，三個不同日期得到三個不同真實股價，
+  證實這是真正的歷史查詢（不是陷阱 1/2 那種「日期被忽略、永遠回最新」的假歷史查詢）。
+  實測回溯到 `date=2023/06/13`（3105 收盤 176.00）依然正常回應，涵蓋本專案需要的
+  近 3 年範圍下限。
+- 欄位（`tables[0]['fields']`，實測樣本）：`代號`、`名稱`、`收盤`（本專案只取這欄，
+  注意欄位名稱是「收盤」兩個字，不是 TWSE 那邊的「收盤價」三個字，動態用
+  `fields.index()` 找對應欄位名稱時不能共用同一個字串常數）、`漲跌`、`開盤`、`最高`、
+  `最低`、`成交股數`、`成交金額(元)`、`成交筆數`、`最後買價`、`最後買量(千股)`、
+  `最後賣價`、`最後賣量(千股)`、`發行股數`、`本益比 參考值`、`本益比 產業別`、
+  `本益比 適用年度`。
+- **非交易日**：`tables[0]['totalCount'] == 0`（`tables[0]['data']` 同時為空 list），
+  跟 T86 用 `stat` 判斷不同，也跟 TPEx `3itrade_hedge_result.php` 用「`data` 是否為空」
+  判斷相同精神，但這裡連 `stat` 欄位本身都固定回 `'ok'`（實測 `2024-06-09`〔週日〕
+  查詢，`totalCount=0`、`data=[]`），跟 TWSE MI_INDEX 用 `stat != 'OK'` 判斷的方式
+  不同，呼叫端不能沿用同一套邏輯。
+- **不需要瀏覽器 UA 也能取得 200**（實測不帶 UA 直接查詢成功），但比照本專案其餘
+  TPEx collector 的既有慣例，仍統一透過 `collectors/_http.py` 帶上 `BROWSER_UA`，
+  避免未來 TPEx 收緊 UA 檢查時又要回頭補這段。
+- **結論：TPEx 收盤價沒有留白/缺口**——第九輪任務原本預期 TPEx 可能只能走「891 檔
+  個股各自查月成交資訊（st44）」這種量級大很多的 fallback 方案，但找到
+  `www/zh-tw/afterTrading/dailyQuotes` 這個「查一天、回全市場」的端點後，TPEx 跟
+  TWSE 一樣可以用逐日 backfill 涵蓋，不需要退回 st44 方案，也不需要在文件裡記錄
+  「TPEx 部分留白」的限制（實測涵蓋率見 HANDOFF.md 第九輪紀錄）。

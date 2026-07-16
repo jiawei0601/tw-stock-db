@@ -1,8 +1,16 @@
-"""從 sector_flow_weekly 匯出一份獨立的靜態 HTML 動畫（板塊資金流動週度動畫），
-不需要伺服器、瀏覽器打開即可播放。只取活動量最大的 N 個板塊（預設 20），避免
-單一畫面塞太多長條看不清楚；可用 --top-n 調整。
+"""從 sector_flow_value_weekly（預設，金額口徑）或 sector_flow_weekly（--mode shares，
+股數口徑）匯出一份獨立的靜態 HTML 動畫（板塊資金流動週度動畫），不需要伺服器、瀏覽器
+打開即可播放。只取活動量最大的 N 個板塊（預設 20），避免單一畫面塞太多長條看不清楚；
+可用 --top-n 調整。
 
-用法：python export_sector_flow_animation.py [--db-path PATH] [--top-n 20] [--out PATH]
+**【第九輪】預設改為金額口徑（--mode value）**：股數不能直接跟 TAIEX（市值加權指數）
+的漲跌方向對照——賣 1 億股 10 元的小型股跟賣 1 億股 1000 元的台積電，對指數的影響天差
+地遠。金額口徑（股數 x 收盤價 ≈ 新台幣元）才能跟指數的金額/市值邏輯對得上。舊的股數口徑
+（`--mode shares`）功能完整保留，不刪除，只是不再是預設，輸出到不同檔名避免互相覆蓋。
+
+用法：
+    python export_sector_flow_animation.py [--db-path PATH] [--top-n 20] [--out PATH]
+                                            [--mode {value,shares}]
 """
 from __future__ import annotations
 
@@ -12,7 +20,8 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DB_PATH = Path(__file__).parent / "data" / "tw_stocks.db"
-DEFAULT_OUT_PATH = Path(__file__).parent / "analysis" / "sector-flow-weekly-animation.html"
+DEFAULT_OUT_PATH_VALUE = Path(__file__).parent / "analysis" / "sector-flow-weekly-animation.html"
+DEFAULT_OUT_PATH_SHARES = Path(__file__).parent / "analysis" / "sector-flow-weekly-animation-shares.html"
 
 _TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-Hant"><head><meta charset="utf-8">
@@ -25,7 +34,7 @@ _TEMPLATE = """<!DOCTYPE html>
   #weekLabel {{ font-weight: 500; }}
 </style>
 </head><body>
-<h1 style="font-size:18px;">板塊資金流動週度動畫（每 5 個交易日一組，三大法人淨買賣超，單位：億股）</h1>
+<h1 style="font-size:18px;">板塊資金流動週度動畫（每 5 個交易日一組，三大法人淨買賣超，單位：{unit}）</h1>
 <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;">
   <button id="playBtn">播放</button>
   <span style="font-size:13px;color:#666;">速度</span>
@@ -45,11 +54,12 @@ _TEMPLATE = """<!DOCTYPE html>
   <canvas id="raceChart"></canvas>
 </div>
 <div style="display:flex;gap:24px;margin-top:8px;padding-top:12px;border-top:1px solid #ddd;font-size:14px;">
-  <span>淨流入合計：<b id="sumIn" style="color:#186bb5;"></b> 億股</span>
-  <span>淨流出合計：<b id="sumOut" style="color:#b5401e;"></b> 億股</span>
-  <span>淨額：<b id="sumNet"></b> 億股</span>
+  <span>淨流入合計：<b id="sumIn" style="color:#186bb5;"></b> {unit}</span>
+  <span>淨流出合計：<b id="sumOut" style="color:#b5401e;"></b> {unit}</span>
+  <span>淨額：<b id="sumNet"></b> {unit}</span>
 </div>
 <p style="font-size:12px;color:#888;margin-top:4px;">合計為圖上顯示的 {top_n} 個板塊加總，非全市場 34 個板塊。</p>
+{coverage_note}
 <h2 style="font-size:14px;margin-top:20px;">當週大盤加權指數（TAIEX）走勢</h2>
 <div style="position:relative;width:100%;height:180px;">
   <canvas id="idxChart"></canvas>
@@ -162,42 +172,108 @@ renderWeek(0);
 """
 
 
-def export(db_path: Path, out_path: Path, top_n: int) -> dict:
+def _load_taiex(conn: sqlite3.Connection) -> list[tuple[str, float]]:
+    return conn.execute("SELECT date, close FROM taiex_daily ORDER BY date").fetchall()
+
+
+def _attach_taiex(weeks: dict[int, dict], taiex_rows: list[tuple[str, float]]) -> None:
+    for wk in weeks.values():
+        wk["idx"] = [
+            {"d": d, "c": round(c, 0)}
+            for d, c in taiex_rows
+            if wk["s"] <= d <= wk["e"]
+        ]
+
+
+def _export_shares(conn: sqlite3.Connection, top_n: int) -> dict:
+    """股數口徑（--mode shares）— 跟第八輪原始行為完全相同，逐字保留，不動邏輯。"""
+    activity = conn.execute(
+        "SELECT industry_name, SUM(ABS(total_net)) as act FROM sector_flow_weekly "
+        "GROUP BY industry_name ORDER BY act DESC LIMIT ?",
+        (top_n,),
+    ).fetchall()
+    sectors = [r[0] for r in activity]
+    sector_idx = {s: i for i, s in enumerate(sectors)}
+
+    placeholders = ",".join("?" * len(sectors))
+    rows = conn.execute(
+        f"SELECT industry_name, week_index, week_start, week_end, total_net "
+        f"FROM sector_flow_weekly WHERE industry_name IN ({placeholders}) ORDER BY week_index",
+        sectors,
+    ).fetchall()
+
+    weeks: dict[int, dict] = {}
+    for industry_name, week_index, week_start, week_end, total_net in rows:
+        weeks.setdefault(week_index, {"s": week_start, "e": week_end, "v": [0.0] * len(sectors)})
+        weeks[week_index]["v"][sector_idx[industry_name]] = round(total_net / 100_000_000, 1)
+
+    _attach_taiex(weeks, _load_taiex(conn))
+    out_weeks = [weeks[i] for i in sorted(weeks.keys())]
+    return {
+        "sectors": sectors, "weeks": out_weeks,
+        "unit": "億股", "coverage_note": "",
+    }
+
+
+def _export_value(conn: sqlite3.Connection, top_n: int) -> dict:
+    """金額口徑（預設）— 用 sector_flow_value_weekly（股數 x 收盤價的約略金額）。"""
+    activity = conn.execute(
+        "SELECT industry_name, SUM(ABS(total_value)) as act FROM sector_flow_value_weekly "
+        "WHERE total_value IS NOT NULL GROUP BY industry_name ORDER BY act DESC LIMIT ?",
+        (top_n,),
+    ).fetchall()
+    sectors = [r[0] for r in activity]
+    sector_idx = {s: i for i, s in enumerate(sectors)}
+
+    placeholders = ",".join("?" * len(sectors))
+    rows = conn.execute(
+        f"SELECT industry_name, week_index, week_start, week_end, trading_days, priced_days, total_value "
+        f"FROM sector_flow_value_weekly WHERE industry_name IN ({placeholders}) ORDER BY week_index",
+        sectors,
+    ).fetchall()
+
+    weeks: dict[int, dict] = {}
+    total_trading_days = 0
+    total_priced_days = 0
+    for industry_name, week_index, week_start, week_end, trading_days, priced_days, total_value in rows:
+        weeks.setdefault(week_index, {"s": week_start, "e": week_end, "v": [0.0] * len(sectors)})
+        # 約略金額單位新台幣元 -> 億元；若該週該板塊完全無法換算（total_value IS NULL），
+        # 顯示為 0（不臆測方向），但涵蓋率統計會誠實記錄這個缺口，不默默隱藏。
+        value = round(total_value / 100_000_000, 1) if total_value is not None else 0.0
+        weeks[week_index]["v"][sector_idx[industry_name]] = value
+        total_trading_days += trading_days
+        total_priced_days += priced_days
+
+    _attach_taiex(weeks, _load_taiex(conn))
+    out_weeks = [weeks[i] for i in sorted(weeks.keys())]
+
+    coverage_pct = 100.0 * total_priced_days / total_trading_days if total_trading_days else 100.0
+    coverage_note = ""
+    if coverage_pct < 99.95:  # 浮點數比較留一點餘裕，避免 100.0 因四捨五入誤判成有缺口
+        coverage_note = (
+            f'<p style="font-size:12px;color:#888;margin-top:2px;">'
+            f"金額流向依當日收盤價換算，圖上 {len(sectors)} 個板塊 x 週次的組合中，"
+            f"有 {total_trading_days - total_priced_days}/{total_trading_days}"
+            f"（{100 - coverage_pct:.2f}%）個「板塊-交易日」因收盤價缺口（TWSE/TPEx 個別股票"
+            f"當天查無收盤價，例如新股掛牌初期或全日暫停交易）而未能完整換算金額，"
+            f"未納入金額換算的股數流向已被排除，不是計為 0，詳見 docs/data-sources.md。</p>"
+        )
+
+    return {
+        "sectors": sectors, "weeks": out_weeks,
+        "unit": "億元", "coverage_note": coverage_note,
+    }
+
+
+def export(db_path: Path, out_path: Path, top_n: int, mode: str = "value") -> dict:
+    if mode not in ("value", "shares"):
+        raise ValueError(f"未知的 mode: {mode}（只接受 'value' 或 'shares'）")
+
     conn = sqlite3.connect(db_path)
     try:
-        activity = conn.execute(
-            "SELECT industry_name, SUM(ABS(total_net)) as act FROM sector_flow_weekly "
-            "GROUP BY industry_name ORDER BY act DESC LIMIT ?",
-            (top_n,),
-        ).fetchall()
-        sectors = [r[0] for r in activity]
-        sector_idx = {s: i for i, s in enumerate(sectors)}
+        result = _export_value(conn, top_n) if mode == "value" else _export_shares(conn, top_n)
+        sectors, out_weeks = result["sectors"], result["weeks"]
 
-        placeholders = ",".join("?" * len(sectors))
-        rows = conn.execute(
-            f"SELECT industry_name, week_index, week_start, week_end, total_net "
-            f"FROM sector_flow_weekly WHERE industry_name IN ({placeholders}) ORDER BY week_index",
-            sectors,
-        ).fetchall()
-
-        weeks: dict[int, dict] = {}
-        for industry_name, week_index, week_start, week_end, total_net in rows:
-            weeks.setdefault(week_index, {"s": week_start, "e": week_end, "v": [0.0] * len(sectors)})
-            weeks[week_index]["v"][sector_idx[industry_name]] = round(total_net / 100_000_000, 1)
-
-        # 補上每週對應的 TAIEX 每日收盤（該週日期區間內實際有資料的交易日，通常 5 筆，
-        # 若 taiex_daily 剛好缺某天就少一筆，不臆測補值）。
-        taiex_rows = conn.execute(
-            "SELECT date, close FROM taiex_daily ORDER BY date"
-        ).fetchall()
-        for week_index, wk in weeks.items():
-            wk["idx"] = [
-                {"d": d, "c": round(c, 0)}
-                for d, c in taiex_rows
-                if wk["s"] <= d <= wk["e"]
-            ]
-
-        out_weeks = [weeks[i] for i in sorted(weeks.keys())]
         data = {"sectors": sectors, "weeks": out_weeks}
         data_json = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
@@ -209,19 +285,17 @@ def export(db_path: Path, out_path: Path, top_n: int) -> dict:
         x_min = int(raw_min) - 1
         x_max = int(raw_max) + 1
 
-        # 注意：TAIEX 折線圖的 y 軸**刻意不固定**，讓 Chart.js 依當週實際指數區間自動
-        # 縮放——這裡跟長條圖的 x 軸固定邏輯相反，因為長條圖的 0 軸是「正負方向的錨點」
-        # 需要固定；但指數走勢圖是絕對價位，3 年間指數從約 17,200 漲到約 47,700，若把
-        # y 軸固定成全域範圍，單週幾百點的正常波動會被壓成一條幾乎看不出起伏的平線，
-        # 反而看不出「當週走勢」，自動縮放才能看清楚每週實際的漲跌形狀。
+        # 注意：TAIEX 折線圖的 y 軸**刻意不固定**（理由見第八輪後續關鍵決策，跟長條圖的
+        # x 軸固定邏輯相反，此處沿用不變）。
 
         html = _TEMPLATE.format(
-            data_json=data_json, max_week=len(out_weeks) - 1, x_min=x_min, x_max=x_max, top_n=len(sectors),
+            data_json=data_json, max_week=len(out_weeks) - 1, x_min=x_min, x_max=x_max,
+            top_n=len(sectors), unit=result["unit"], coverage_note=result["coverage_note"],
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(html, encoding="utf-8")
 
-        return {"sectors": len(sectors), "weeks": len(out_weeks), "out_path": str(out_path)}
+        return {"sectors": len(sectors), "weeks": len(out_weeks), "out_path": str(out_path), "mode": mode}
     finally:
         conn.close()
 
@@ -229,12 +303,18 @@ def export(db_path: Path, out_path: Path, top_n: int) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT_PATH)
+    parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--top-n", type=int, default=20)
+    parser.add_argument("--mode", choices=["value", "shares"], default="value",
+                         help="value=金額口徑（預設，股數 x 收盤價）／shares=股數口徑（第八輪舊版行為）")
     args = parser.parse_args()
 
-    summary = export(args.db_path, args.out, args.top_n)
-    print(f"匯出完成：{summary['sectors']} 個板塊、{summary['weeks']} 週 -> {summary['out_path']}")
+    out_path = args.out
+    if out_path is None:
+        out_path = DEFAULT_OUT_PATH_VALUE if args.mode == "value" else DEFAULT_OUT_PATH_SHARES
+
+    summary = export(args.db_path, out_path, args.top_n, args.mode)
+    print(f"匯出完成（{summary['mode']} 模式）：{summary['sectors']} 個板塊、{summary['weeks']} 週 -> {summary['out_path']}")
 
 
 if __name__ == "__main__":

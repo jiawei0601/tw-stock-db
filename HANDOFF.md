@@ -2,9 +2,9 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-16（第八輪：`sector_flow_weekly` 週度彙總表 +
-  板塊資金流動週度動畫（靜態 HTML）+ 動畫優化（固定 x 軸/淨流入流出合計/TAIEX 走勢），
-  詳見下方第八輪紀錄）
+- 最後更新：Claude Code @ 2026-07-17（第九輪：`daily_prices` 個股歷史收盤價 +
+  `sector_flow_value_daily`/`sector_flow_value_weekly` 金額口徑板塊資金流 + 動畫改為
+  預設金額模式 + 五份「法人資金流向預測力系列」分析報告，詳見下方第九輪紀錄）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
@@ -259,7 +259,65 @@
       收盤值落在合理量級、無重複日期）、`test_sector_flow_animation_export.py`
       新增 3 個測試（x 軸固定不自動縮放、每週都有 TAIEX 資料點、底部合計元素存在）。
       全專案測試共 50 個，全綠。
-- 進行中（做到哪一步）：無，第八輪任務範圍內的項目已全部完成。
+  - **【第九輪】三大法人板塊資金流「金額口徑」（股數 x 收盤價換算）＋五份法人流向
+    預測力分析報告**：股數口徑不能直接跟市值加權的 TAIEX 比較（賣 1 億股 10 元小型股
+    跟賣 1 億股千元台積電對指數影響天差地遠），本輪補上金額維度，跟既有股數口徑並存、
+    不取代：
+    - **`daily_prices` 個股歷史收盤價**（新表，PK `(stock_id, date)`）：新增
+      `collectors/prices.py`（TWSE `afterTrading/MI_INDEX` + TPEx `www/zh-tw/
+      afterTrading/dailyQuotes`，兩者皆已實測確認真正支援歷史查詢，排查過程與陷阱
+      endpoint 見 `docs/data-sources.md` 第 20-21 節）+ `build_daily_prices.py`
+      （比照三大法人 backfill 的可續傳設計：`price_fetch_log` 記錄已查「市場+日期」、
+      每 20 個日曆日 commit、單日失敗跳過）。範圍刻意比全市場窄：只抓
+      `institutional_flow_daily` 實際出現過的股票（1970 檔）x 其完整日期範圍。
+      **實測結果：1,377,667 列**，涵蓋 2023-06-13 ~ 2026-07-16，對齊
+      `institutional_flow_daily` 的 (stock_id, date) 逐筆涵蓋率 **99.97%**
+      （TWSE 99.99% / TPEx 99.95%，缺 372 筆為停牌/全額交割等無收盤價情況，
+      金額換算時如實排除、不臆測價格）。
+    - **`sector_flow_value_daily`（25,500 列 = 34 板塊 x 750 交易日）+
+      `sector_flow_value_weekly`（5,100 列 = 34 板塊 x 150 週）**：新增
+      `build_sector_flow_value.py`，股數 JOIN 收盤價換算「約略金額」（新台幣元，
+      用當日收盤價換算全部買賣超股數，是近似值不是精確成交金額）後依板塊聚合，
+      純本地聚合秒級完成；`week_index` 刻意對齊 `sector_flow_weekly` 同一套日期
+      序列，股數/金額兩版可互相對照。金額欄位 NULL 語意=「完全無成分股可換算」，
+      與 0 不同語意（見 AGENTS.md Interface Contract）。目前 0 列 NULL。
+    - **`export_sector_flow_animation.py` 改版**：預設 `--mode value`（金額口徑，
+      單位億元，輸出 `analysis/sector-flow-weekly-animation.html`），`--mode shares`
+      保留第八輪股數口徑舊行為（輸出 `...-shares.html`）；金額模式偵測到收盤價
+      覆蓋率 <99.95% 會在頁面加誠實揭露文字。
+    - **五份「法人資金流向預測力系列」分析報告**（`analysis/` 下，一次性分析輸出、
+      非可重跑腳本，性質同第六輪報告）：
+      1. `taiex-flow-correlation-2026-07-16.md` — TAIEX 與三大法人流向關聯
+      2. `flow-persistence-seasonality-2026-07-16.md` — 流向持續性與季節性
+      3. `trust-streak-price-impact-2026-07-17.md` — 投信連買對個股股價的影響
+      4. `trust-streak-taiex-2026-07-17.md` — 投信連買與大盤的關係
+      5. `sector-flow-entry-signal-2026-07-17.md` — 板塊資金流作為進場訊號的回測
+      **系列總結論：描述性有效、預測性全部失敗**——法人流向資料能如實描述「錢流去
+      哪了」（與同期漲跌高度相關，部分是機械性的：外資買權值股≈指數漲本身），但
+      所有嘗試過的「用流向預測未來報酬」訊號（連買 streak、板塊輪動進場等）在
+      考慮交易成本與基準比較後都沒有可操作的優勢，細節與方法論限制見各報告。
+    - **收尾過程兩段實情（如實記錄，供後續 agent 判讀資料可信度）**：
+      1. **收尾進程曾崩潰**：第一次執行 `build_sector_flow_value.py` 時進程崩潰
+         （原因未能確定，腳本本身複查無 bug，第二次執行 7.6 秒正常完成），SQLite
+         hot journal 在下次開啟時自動回滾未提交交易，`PRAGMA integrity_check` 通過，
+         `daily_prices` 等既有表無損。
+      2. **TPEx 收盤價回補缺口被測試攔截後補完**：崩潰後接手收尾時，
+         `test_daily_prices_tpex_coverage_high` 亮紅燈（TPEx 涵蓋率僅 82.2%），
+         追查 `price_fetch_log` 發現 TPEx backfill 其實只跑到 2026-01-09（940/1130
+         個日曆日）就中斷、且中斷未被察覺，前次交接誤報「回補完整」（127 萬列的
+         絕對數字掩蓋了 TPEx 尾端缺 190 個日曆日/123 個交易日）。利用
+         `build_daily_prices.py` 既有可續傳機制補完（5.5 分鐘），涵蓋率升至
+         99.97%，`sector_flow_value_*` 重建後 NULL 列從 246（日）/48（週）降為 0，
+         測試轉綠。**教訓：長跑 backfill 腳本「有跑完 log」不等於「範圍跑完」，
+         交接前要用涵蓋率查詢驗收，不能只看列數量級。**
+    - 新增 `tests/test_daily_prices.py`（7 個測試：非空、PK 無重複、收盤價量級、
+      2330 已知值交叉核對、日期範圍對齊、TWSE/TPEx 涵蓋率——正是涵蓋率測試攔下
+      上述缺口）、`tests/test_sector_flow_value.py`（13 個測試：兩表列數/板塊數/
+      週次對齊、金額=股數x收盤價抽查、NULL 語意等）；
+      `tests/test_sector_flow_animation_export.py` 更新支援雙模式。
+      全專案測試共 **70 個，全綠**。
+    - `AGENTS.md`／`docs/data-sources.md`（第 20-21 節）同步更新。
+- 進行中（做到哪一步）：無，第九輪任務範圍內的項目已全部完成。
 - 下一步（下一個任務，非本次範圍）：
   1. **持續補充族群/概念股**：`stock_groups` 是人工整理/使用者提供資料，非官方來源，
      之後有新的族群清單可比照同樣模式（核對代號後 `INSERT OR REPLACE`）繼續累積，
@@ -533,7 +591,16 @@
                                             # 中途中斷可直接重跑，會從資料庫現有進度接續）
   python build_sector_flow.py              # 【第七輪起全市場】板塊資金流彙總（純本地
                                             # 聚合，秒級完成，依賴上一步已跑過）
-  python -m pytest tests/ -q               # 驗證資料庫內容（33 個測試）
+  python build_sector_flow_weekly.py       # 【第八輪】週度彙總（純本地聚合，秒級）
+  python build_taiex.py                    # 【第八輪後續】TAIEX 大盤日收盤（38 次
+                                            # 月份請求，數十秒）
+  python build_daily_prices.py             # 【第九輪】個股歷史收盤價（可續傳，首次
+                                            # 全量約 60-90 分鐘；中斷可直接重跑續傳，
+                                            # 跑完務必用涵蓋率查詢驗收，見第九輪教訓）
+  python build_sector_flow_value.py        # 【第九輪】金額口徑板塊資金流日/週表
+                                            # （純本地聚合，秒級）
+  python export_sector_flow_animation.py   # 【第九輪起預設金額模式】週度動畫 HTML
+  python -m pytest tests/ -q               # 驗證資料庫內容（70 個測試）
   ```
   **注意**：`build_revenue_history.py` 與 `build_institutional_summary.py` 都不要跟
   其他 build 腳本同時併發執行（見上方 SQLite 單寫入者雷區）；五個 build 腳本本身
