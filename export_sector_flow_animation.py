@@ -67,7 +67,7 @@ const chart = new Chart(ctx, {{
     animation: {{ duration: 350 }},
     plugins: {{ legend: {{ display: false }} }},
     scales: {{
-      x: {{ ticks: {{ color: '#898781' }} }},
+      x: {{ min: {x_min}, max: {x_max}, ticks: {{ color: '#898781' }} }},
       y: {{ ticks: {{ color: '#0b0b0b' }} }}
     }}
   }}
@@ -139,7 +139,15 @@ def export(db_path: Path, out_path: Path, top_n: int) -> dict:
         data = {"sectors": sectors, "weeks": out_weeks}
         data_json = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
-        html = _TEMPLATE.format(data_json=data_json, max_week=len(out_weeks) - 1)
+        # 固定 x 軸範圍（不隨每週資料自動縮放），讓 0 軸位置在整個動畫播放過程中
+        # 保持在畫面同一個像素位置，不會因為某一週數值特別大/小而左右移動。
+        # 用全部 top-N 板塊、全部週次的實際極值取整數 padding，兩側對稱留一點餘裕。
+        all_values = [v for wk in out_weeks for v in wk["v"]]
+        raw_min, raw_max = min(all_values), max(all_values)
+        x_min = int(raw_min) - 1
+        x_max = int(raw_max) + 1
+
+        html = _TEMPLATE.format(data_json=data_json, max_week=len(out_weeks) - 1, x_min=x_min, x_max=x_max)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(html, encoding="utf-8")
 

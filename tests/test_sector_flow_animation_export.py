@@ -14,13 +14,17 @@ DB_PATH = Path(__file__).parent.parent / "data" / "tw_stocks.db"
 
 
 @pytest.fixture(scope="module")
-def exported(tmp_path_factory):
+def exported_html(tmp_path_factory):
     if not DB_PATH.exists():
         pytest.fail(f"{DB_PATH} 不存在，請先跑: python build_db.py")
     out_path = tmp_path_factory.mktemp("export") / "animation.html"
     export_mod.export(DB_PATH, out_path, top_n=20)
-    html = out_path.read_text(encoding="utf-8")
-    m = re.search(r"const DATA = (\{.*?\});", html, re.S)
+    return out_path.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def exported(exported_html):
+    m = re.search(r"const DATA = (\{.*?\});", exported_html, re.S)
     assert m is not None, "HTML 內找不到 DATA 變數"
     return json.loads(m.group(1))
 
@@ -45,3 +49,16 @@ def test_export_selects_most_active_sectors(exported):
     """驗證匯出的板塊確實是活動量最大的 20 個（半導體業/金融保險業等應在其中）。"""
     assert "半導體業" in exported["sectors"]
     assert "金融保險業" in exported["sectors"]
+
+
+def test_export_x_axis_is_fixed_not_auto_scaling(exported_html, exported):
+    """x 軸 min/max 必須是固定數字寫死在 Chart.js options 裡，不能讓 Chart.js 每週
+    自動依當週資料縮放——否則 0 軸的像素位置會隨每週數值大小左右跑動，動畫會很難看懂。
+    """
+    m = re.search(r"x:\s*\{\s*min:\s*(-?\d+),\s*max:\s*(-?\d+)", exported_html)
+    assert m is not None, "HTML 內找不到固定的 x 軸 min/max 設定"
+    x_min, x_max = int(m.group(1)), int(m.group(2))
+
+    all_values = [v for wk in exported["weeks"] for v in wk["v"]]
+    assert x_min <= min(all_values), "x_min 沒有涵蓋實際資料的最小值，長條會被裁切"
+    assert x_max >= max(all_values), "x_max 沒有涵蓋實際資料的最大值，長條會被裁切"
