@@ -50,6 +50,10 @@ _TEMPLATE = """<!DOCTYPE html>
   <span>淨額：<b id="sumNet"></b> 億股</span>
 </div>
 <p style="font-size:12px;color:#888;margin-top:4px;">合計為圖上顯示的 {top_n} 個板塊加總，非全市場 34 個板塊。</p>
+<h2 style="font-size:14px;margin-top:20px;">當週大盤加權指數（TAIEX）走勢</h2>
+<div style="position:relative;width:100%;height:180px;">
+  <canvas id="idxChart"></canvas>
+</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
 const DATA = {data_json};
@@ -79,6 +83,33 @@ const chart = new Chart(ctx, {{
   }}
 }});
 
+const idxCtx = document.getElementById('idxChart');
+const idxChart = new Chart(idxCtx, {{
+  type: 'line',
+  data: {{
+    labels: DATA.weeks[0].idx.map(p => p.d.slice(5)),
+    datasets: [{{
+      data: DATA.weeks[0].idx.map(p => p.c),
+      borderColor: '#534AB7',
+      backgroundColor: 'rgba(83,74,183,0.1)',
+      fill: true,
+      tension: 0.2,
+      pointRadius: 3,
+      pointBackgroundColor: '#534AB7',
+    }}]
+  }},
+  options: {{
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: {{ duration: 350 }},
+    plugins: {{ legend: {{ display: false }} }},
+    scales: {{
+      x: {{ ticks: {{ color: '#898781' }} }},
+      y: {{ ticks: {{ color: '#898781' }} }}
+    }}
+  }}
+}});
+
 const slider = document.getElementById('weekSlider');
 const label = document.getElementById('weekLabel');
 const playBtn = document.getElementById('playBtn');
@@ -102,6 +133,10 @@ function renderWeek(i) {{
   sumInEl.textContent = '+' + sumIn.toFixed(1);
   sumOutEl.textContent = sumOut.toFixed(1);
   sumNetEl.textContent = (sumIn + sumOut >= 0 ? '+' : '') + (sumIn + sumOut).toFixed(1);
+
+  idxChart.data.labels = wk.idx.map(p => p.d.slice(5));
+  idxChart.data.datasets[0].data = wk.idx.map(p => p.c);
+  idxChart.update();
 }}
 
 function stepForward() {{
@@ -150,6 +185,18 @@ def export(db_path: Path, out_path: Path, top_n: int) -> dict:
             weeks.setdefault(week_index, {"s": week_start, "e": week_end, "v": [0.0] * len(sectors)})
             weeks[week_index]["v"][sector_idx[industry_name]] = round(total_net / 100_000_000, 1)
 
+        # 補上每週對應的 TAIEX 每日收盤（該週日期區間內實際有資料的交易日，通常 5 筆，
+        # 若 taiex_daily 剛好缺某天就少一筆，不臆測補值）。
+        taiex_rows = conn.execute(
+            "SELECT date, close FROM taiex_daily ORDER BY date"
+        ).fetchall()
+        for week_index, wk in weeks.items():
+            wk["idx"] = [
+                {"d": d, "c": round(c, 0)}
+                for d, c in taiex_rows
+                if wk["s"] <= d <= wk["e"]
+            ]
+
         out_weeks = [weeks[i] for i in sorted(weeks.keys())]
         data = {"sectors": sectors, "weeks": out_weeks}
         data_json = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
@@ -161,6 +208,12 @@ def export(db_path: Path, out_path: Path, top_n: int) -> dict:
         raw_min, raw_max = min(all_values), max(all_values)
         x_min = int(raw_min) - 1
         x_max = int(raw_max) + 1
+
+        # 注意：TAIEX 折線圖的 y 軸**刻意不固定**，讓 Chart.js 依當週實際指數區間自動
+        # 縮放——這裡跟長條圖的 x 軸固定邏輯相反，因為長條圖的 0 軸是「正負方向的錨點」
+        # 需要固定；但指數走勢圖是絕對價位，3 年間指數從約 17,200 漲到約 47,700，若把
+        # y 軸固定成全域範圍，單週幾百點的正常波動會被壓成一條幾乎看不出起伏的平線，
+        # 反而看不出「當週走勢」，自動縮放才能看清楚每週實際的漲跌形狀。
 
         html = _TEMPLATE.format(
             data_json=data_json, max_week=len(out_weeks) - 1, x_min=x_min, x_max=x_max, top_n=len(sectors),

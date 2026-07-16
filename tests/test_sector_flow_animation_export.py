@@ -51,6 +51,16 @@ def test_export_selects_most_active_sectors(exported):
     assert "金融保險業" in exported["sectors"]
 
 
+def test_export_has_taiex_index_per_week(exported):
+    """每週都要附上 TAIEX 走勢資料點，且不能是空陣列（會讓走勢圖整週空白）。"""
+    for wk in exported["weeks"]:
+        assert "idx" in wk
+        assert len(wk["idx"]) > 0, f"week {wk['s']}~{wk['e']} 沒有任何 TAIEX 資料點"
+        for point in wk["idx"]:
+            assert "d" in point and "c" in point
+            assert 5000 < point["c"] < 100000
+
+
 def test_export_has_inflow_outflow_summary_elements(exported_html):
     """底部淨流入/淨流出/淨額合計列必須存在，且有註明合計範圍只是圖上的 top-N 板塊
     （不是全市場），避免使用者誤以為是全市場總計。"""
