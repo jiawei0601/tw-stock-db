@@ -9,10 +9,15 @@
 人工標記（`stock_groups`），以及**【第七輪起】全市場**（`stocks` 表全部，目前 1971 檔）
 股票的月營收/籌碼集中度/三大法人動態三種延伸資料，**【第九輪起】** 三大法人板塊資金
 流向新增「金額（新台幣元，股數 x 收盤價換算）」口徑，跟原有「股數」口徑並存（股數不能
-直接跟市值加權的 TAIEX 指數比較，金額口徑才能對齊指數漲跌方向）。個人投資用途，為未來
+直接跟市值加權的 TAIEX 指數比較，金額口徑才能對齊指數漲跌方向）。**【第十輪起】** 三大
+法人資金流向新增「族群（概念股）層級」彙總（`group_flow_*`），是板塊層級（`sector_
+flow_*`）的族群版，股數/金額兩口徑、日/週兩粒度皆有，共四張表。個人投資用途，為未來
 「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。**視覺化網頁本身不在任何一輪任務範圍
-內**，見 HANDOFF.md 下一步。`stock_groups`（91 檔概念股標記）仍是有效資料，可用於未來
-「篩選出概念股子集」的查詢用途，但不再是這三張延伸資料表的篩選範圍。
+內**，見 HANDOFF.md 下一步。`stock_groups`（91 檔概念股標記）**【第十輪起】** 除了原有
+「篩選出概念股子集」的查詢用途，也是 `group_flow_*` 四張表的聚合依據，但**族群成分重疊
+（一檔股票可屬多個族群），`group_flow_*` 的數字不可跨族群相加**，跟 `sector_flow_*`
+（每檔股票唯一歸屬一個官方產業別）的加總語意不同，見下方 build/run 段落與 Interface
+Contract。
 
 ## 專案慣例
 
@@ -98,7 +103,24 @@
     金額模式若偵測到收盤價覆蓋率 <99.95% 會在頁面加一行誠實揭露的說明文字；依賴
     `build_sector_flow_weekly.py`／`build_sector_flow_value.py`／`build_taiex.py`
     都已跑過。
-  - 十一個 build/export 腳本彼此獨立、互不覆寫對方的表，可任意順序重跑（但不可同時
+  - `python build_group_flow.py [--db-path PATH] [--chunk-size 5]`（**【第十輪】**
+    `group_flow_daily`／`group_flow_weekly`（股數口徑）＋ `group_flow_value_daily`／
+    `group_flow_value_weekly`（金額口徑）四張表，從本地 `institutional_flow_daily`
+    JOIN `stock_groups`（19 個族群、91 檔標的，一檔可屬多個族群）聚合每個族群每日/每週
+    三大法人買賣超合計，`group_flow_value_*` 另外 JOIN `daily_prices` 換算金額，schema
+    與聚合邏輯完全比照 `sector_flow_daily`／`sector_flow_weekly`／`sector_flow_value_
+    daily`／`sector_flow_value_weekly`（只是 `industry_name` 換成 `group_name`），
+    `week_index` 沿用與 `sector_flow_weekly` 完全相同的交易日序列切分，可互相對照。
+    純本地聚合，不對外發送任何請求，秒級完成；整批快照覆蓋，idempotent；依賴
+    `build_institutional_summary.py`／`build_daily_prices.py`／`build_sector_flow.py`
+    都已跑過（`build_sector_flow.py` 只是用來取得交易日序列，非資料依賴本身）。
+    **【重要語意，跟 `sector_flow_*` 不同】** `stock_groups` 的 `stock_id` 可以同時
+    對應多個 `group_name`（一檔股票屬於多個概念股族群），所以 `group_flow_*` 四張表
+    的數字**不可跨族群相加**（例如把 19 個族群的 `total_net` 加總沒有意義，會重複
+    計算橫跨多族群的股票，跟全市場/全概念股合計對不上）——這跟 `sector_flow_*`（每檔
+    股票在 `stocks.industry_name` 裡只有唯一一個官方產業別，跨板塊加總才有意義）的
+    加總語意完全不同，使用時務必只在「單一族群自己內部」的語意下解讀數字。
+  - 十二個 build/export 腳本彼此獨立、互不覆寫對方的表，可任意順序重跑（但不可同時
     併發跑，見上），`build_revenue_history.py`／`build_fundamentals.py`／
     `build_institutional_summary.py`／`build_sector_flow.py`／`build_taiex.py` 都依賴
     `stocks`/`sector_flow_daily` 已有資料，須先跑過 `build_db.py`；`build_sector_flow.py`
@@ -109,7 +131,8 @@
     股票與日期範圍）；`build_sector_flow_value.py` 依賴 `build_daily_prices.py`／
     `build_sector_flow.py` 都已跑過；`export_sector_flow_animation.py` 依賴
     `build_sector_flow_weekly.py`／`build_sector_flow_value.py`／`build_taiex.py`
-    都已跑過。
+    都已跑過；`build_group_flow.py` 依賴 `build_institutional_summary.py`／
+    `build_daily_prices.py`／`build_sector_flow.py` 都已跑過。
 
 ## 架構
 
@@ -160,6 +183,14 @@ export_sector_flow_animation.py    -> 【第八輪＋後續＋第九輪改版】
                                   sector_flow_weekly（--mode shares，股數口徑）取
                                   活動量最大的 top-N 板塊 + taiex_daily 依週切出每週指數點
                                   -> 匯出獨立靜態 HTML 動畫檔（長條圖+TAIEX走勢圖+合計列）
+build_group_flow.py                -> 【第十輪】orchestrate：institutional_flow_daily
+                                  JOIN stock_groups（19 族群/91 檔，一檔可屬多族群）
+                                  -> group_flow_daily/weekly（股數口徑）；institutional_
+                                  flow_daily 的股數 JOIN daily_prices 的收盤價 -> 約略
+                                  金額 -> 依 stock_groups 聚合 -> group_flow_value_
+                                  daily/weekly（金額口徑）；週切分沿用與 sector_flow_
+                                  weekly 相同的交易日序列（純本地聚合，不對外發送請求，
+                                  數字不可跨族群相加，見下方 Interface Contract）
 ```
 
 ## Interface Contract（違反視為 bug）
@@ -204,6 +235,20 @@ export_sector_flow_animation.py    -> 【第八輪＋後續＋第九輪改版】
    `trust_value`/`dealer_value`/`total_value`）**允許 NULL**，語意是「當天/當週完全
    沒有任何成分股查得到收盤價、無法換算金額」，跟「換算出來剛好是 0」是不同語意，
    不可混用（呼叫端必須用 `IS NULL` 判斷，不能假設缺資料等於 0）。
+   **【第十輪】** `group_flow_daily` PK 為 `(group_name, date)`，`group_flow_weekly`
+   PK 為 `(group_name, week_index)`，`group_flow_value_daily` PK 為
+   `(group_name, date)`，`group_flow_value_weekly` PK 為 `(group_name, week_index)`，
+   四張表的欄位與 NULL 語意分別完全比照 `sector_flow_daily`／`sector_flow_weekly`／
+   `sector_flow_value_daily`／`sector_flow_value_weekly`（只是 `industry_name` 換成
+   `group_name`），`week_index` 沿用與 `sector_flow_weekly` 完全相同的交易日序列切分。
+   **與 `sector_flow_*` 唯一但關鍵的語意差異**：`stock_groups` 的 `(stock_id,
+   group_name)` 是多對多關係（一檔股票可同時屬於多個族群），而 `stocks.industry_name`
+   是每檔股票唯一一個官方產業別（多對一）。因此 `group_flow_*` 四張表**每一列的數字
+   只在該族群自己內部成立，絕不可跨族群相加**（例如對 19 個族群的某日 `total_net`
+   做 `SUM` 會重複計算橫跨多族群的股票，結果會大於全市場/全概念股去重後的真實合計），
+   跟 `sector_flow_*` 可以安全跨板塊加總（因為每檔股票只算一次）完全不同，呼叫端
+   （含未來的視覺化網頁）必須把 `group_flow_*` 當成「單一族群的獨立時序」使用，不能
+   當成可加總分解全市場資金流向的分量表。
 
 ## 資料源
 

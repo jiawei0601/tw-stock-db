@@ -2,9 +2,9 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-17（第九輪：`daily_prices` 個股歷史收盤價 +
-  `sector_flow_value_daily`/`sector_flow_value_weekly` 金額口徑板塊資金流 + 動畫改為
-  預設金額模式 + 五份「法人資金流向預測力系列」分析報告，詳見下方第九輪紀錄）
+- 最後更新：Claude Code @ 2026-07-17（第十輪：`group_flow_daily`/`group_flow_weekly`/
+  `group_flow_value_daily`/`group_flow_value_weekly` 族群（概念股）層級資金流彙總表，
+  詳見下方第十輪紀錄）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
@@ -317,7 +317,52 @@
       `tests/test_sector_flow_animation_export.py` 更新支援雙模式。
       全專案測試共 **70 個，全綠**。
     - `AGENTS.md`／`docs/data-sources.md`（第 20-21 節）同步更新。
-- 進行中（做到哪一步）：無，第九輪任務範圍內的項目已全部完成。
+  - **【第十輪】族群（概念股）層級資金流彙總表 —— `sector_flow_*` 系列的族群版**：
+    使用者指出板塊層級（`sector_flow_*`）跟族群層級（`stock_groups`，19 個族群、
+    91 檔標的）的聚合資料都已齊備，只差聚合這一步。新增 `build_group_flow.py`，從
+    `institutional_flow_daily` JOIN `stock_groups` 一次產出四張表：
+    - `group_flow_daily`（股數口徑，PK `(group_name, date)`）／`group_flow_weekly`
+      （股數口徑，週切分，PK `(group_name, week_index)`）：schema 與聚合邏輯完全比照
+      `sector_flow_daily`／`sector_flow_weekly`，只是 `industry_name` 換成
+      `group_name`。
+    - `group_flow_value_daily`（金額口徑，PK `(group_name, date)`）／
+      `group_flow_value_weekly`（金額口徑，PK `(group_name, week_index)`）：JOIN
+      `daily_prices` 換算約略金額，schema／NULL 語意／涵蓋率欄位完全比照
+      `sector_flow_value_daily`／`sector_flow_value_weekly`。
+    - `week_index` 沿用與 `sector_flow_weekly` 完全相同的交易日序列切分邏輯（同一份
+      `dates` 列表、同一種 `i // chunk_size` 編號），實測抽查對齊 100% 一致，族群版
+      跟板塊版可互相對照同一個「第 N 週」。
+    - **核心語意差異（跟 `sector_flow_*` 不同，是本輪任務最重要的設計決策）**：
+      `stock_groups` 的 `(stock_id, group_name)` 是多對多關係——一檔股票可以同時屬於
+      多個族群（實測 91 檔中確有多檔橫跨 2 個以上族群，例如 2330 台積電同時屬於
+      「CoWoS先進封裝供應鏈」與另一個族群），而 `sector_flow_*` 依賴的
+      `stocks.industry_name` 是每檔股票唯一一個官方產業別（多對一）。**因此
+      `group_flow_*` 四張表每一列的數字只在該族群自己內部成立，絕不可跨族群相加**
+      （例如把 19 個族群某天的 `total_net` 全部 `SUM` 起來，會重複計算橫跨多族群的
+      股票，結果比全市場/全概念股去重後的真實合計還大，沒有實質意義）——這點已寫進
+      腳本 docstring 開頭最顯眼的位置與 `AGENTS.md` 的 build/run 段落＋Interface
+      Contract，並用一條測試（`test_group_flow_daily_cross_group_stock_count_
+      exceeds_distinct_stock_count`）直接在資料上證明「跨族群加總 ≠ 全市場合計」，
+      不只是口頭警語。
+    - **實測結果**：`group_flow_daily`／`group_flow_value_daily` 各 **14,250 列**
+      （19 族群 x 750 交易日），`group_flow_weekly`／`group_flow_value_weekly` 各
+      **2,850 列**（19 族群 x 150 週），日期範圍 `2023-06-13` ~ `2026-07-16`（與
+      `sector_flow_daily` 完全一致，因為都是從同一份 `institutional_flow_daily` 衍生）。
+      金額口徑兩表**目前 0 列 NULL**（`stock_groups` 91 檔全數已被 `daily_prices`
+      涵蓋，收盤價缺口在族群範圍內剛好沒有造成任何一天/一週完全無法換算）。純本地
+      聚合，執行耗時數秒（四張表一次跑完，不需要分開執行四個腳本）。
+    - `tests/test_group_flow.py` 新增 21 個測試，比照 `test_sector_flow.py`／
+      `test_sector_flow_value.py` 的驗證模式（表非空、19 族群涵蓋、`total_net`/
+      `total_value` 等於分量和、抽查一天/一週數字與成分股逐筆加總一致、週切分與
+      `sector_flow_weekly` 對齊、金額表 NULL 語意），額外新增 2 個測試專門驗證族群
+      成分重疊的核心語意（`test_stock_groups_has_overlapping_membership` 確認 91 檔
+      中確實有股票橫跨多族群、`test_group_flow_daily_cross_group_stock_count_
+      exceeds_distinct_stock_count` 用 `stock_count` 結構性計數而非金額/股數淨額
+      驗證跨族群加總必然重複計算，避免用淨額做斷言可能因數字巧合抵銷而失效）。
+      全專案測試共 **91 個，全綠**。
+    - `AGENTS.md` 更新：專案定位段落、build/run 新增 `build_group_flow.py` 說明、
+      架構圖新增一行、Interface Contract 新增族群表 schema 與跨族群加總語意警語。
+- 進行中（做到哪一步）：無，第十輪任務範圍內的項目已全部完成。
 - 下一步（下一個任務，非本次範圍）：
   1. **持續補充族群/概念股**：`stock_groups` 是人工整理/使用者提供資料，非官方來源，
      之後有新的族群清單可比照同樣模式（核對代號後 `INSERT OR REPLACE`）繼續累積，
@@ -339,11 +384,15 @@
   3. **視覺化網頁**：讀 `data/tw_stocks.db` 的 `stocks` + `stock_groups` +
      `monthly_revenue`（近 3 年時序，全市場）+ `shareholding_concentration`
      （全市場）+ `institutional_flow_summary`/`institutional_flow_daily`（近 3 年
-     時序，全市場）+ `sector_flow_daily`/`sector_flow_weekly`（全市場板塊彙總）做
+     時序，全市場）+ `sector_flow_daily`/`sector_flow_weekly`（全市場板塊彙總）+
+     `group_flow_daily`/`group_flow_weekly`（族群彙總，**第十輪起資料已備妥**，但
+     UI 呈現時務必遵守「族群數字不可跨族群相加」的語意，見 AGENTS.md）做
      「資金流向依板塊/族群」儀表板。第八輪的週度動畫（`analysis/
      sector-flow-weekly-animation.html`）算是這個方向的第一個可用產出物，但只是
      單一靜態 HTML 檔、只涵蓋板塊維度的 top-20，還不是完整的互動儀表板（沒有族群
-     維度、沒有個股鑽取、沒有跟月營收/籌碼集中度串接）。
+     維度、沒有個股鑽取、沒有跟月營收/籌碼集中度串接；`export_sector_flow_
+     animation.py` 目前只讀 `sector_flow_*`，若要做族群版動畫需要另外處理「族群重疊
+     不能簡單取 top-N 加總」的呈現方式，尚未實作）。
   4. **定期刷新排程**：`build_db.py` 與 `build_fundamentals.py`（籌碼集中度）仍是
      整批快照覆蓋，可任意頻率重跑（籌碼集中度全市場實測仍是秒級完成）。
      `build_revenue_history.py` 與 `build_institutional_summary.py` 都已改成增量式，
@@ -600,9 +649,16 @@
   python build_sector_flow_value.py        # 【第九輪】金額口徑板塊資金流日/週表
                                             # （純本地聚合，秒級）
   python export_sector_flow_animation.py   # 【第九輪起預設金額模式】週度動畫 HTML
-  python -m pytest tests/ -q               # 驗證資料庫內容（70 個測試）
+  python build_group_flow.py               # 【第十輪】族群（概念股）層級資金流彙總，
+                                            # 股數+金額口徑、日+週粒度共四張表（純本地
+                                            # 聚合，秒級；依賴 build_institutional_
+                                            # summary.py/build_daily_prices.py/
+                                            # build_sector_flow.py 都已跑過）
+  python -m pytest tests/ -q               # 驗證資料庫內容（91 個測試）
   ```
   **注意**：`build_revenue_history.py` 與 `build_institutional_summary.py` 都不要跟
   其他 build 腳本同時併發執行（見上方 SQLite 單寫入者雷區）；五個 build 腳本本身
   彼此獨立，依序（或任意非併發順序）重跑都安全，但 `build_sector_flow.py` 依賴
-  `build_institutional_summary.py` 已有資料。
+  `build_institutional_summary.py` 已有資料，`build_group_flow.py` 依賴
+  `build_institutional_summary.py`／`build_daily_prices.py`／`build_sector_flow.py`
+  都已跑過。
