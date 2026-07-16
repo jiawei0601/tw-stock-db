@@ -1,8 +1,9 @@
 """板塊（官方產業別）資金流向彙總 — 從 institutional_flow_daily 依 stocks.industry_name
 聚合出每個板塊每日三大法人買賣超合計，供板塊間資金流動關係分析與未來視覺化使用。
 
-範圍：只涵蓋 stock_groups 名單（91 檔）目前橫跨的 13 個板塊，不是全市場 34 個板塊
-（全市場覆蓋需要 institutional_flow_daily 擴大到 1971 檔，非本次範圍，見 HANDOFF.md）。
+範圍：【第七輪】涵蓋全市場（`institutional_flow_daily` 已擴大到 stocks 全部 1971 檔），
+不再限定 stock_groups 名單（91 檔）橫跨的 13 個板塊，理論上應涵蓋 stocks 表中實際存在
+的全部板塊數（實測結果見 HANDOFF.md 第七輪紀錄）。
 
 Idempotent：整批刷新（DELETE + 整批 INSERT），因為來源本身（institutional_flow_daily）
 已經是完整的 3 年時序表，沒有增量語意。
@@ -49,7 +50,6 @@ def build(db_path: Path) -> dict:
                 SUM(f.foreign_net + f.trust_net + f.dealer_net)
             FROM institutional_flow_daily f
             JOIN stocks s ON s.stock_id = f.stock_id
-            WHERE f.stock_id IN (SELECT DISTINCT stock_id FROM stock_groups)
             GROUP BY s.industry_name, f.date
             """
         )

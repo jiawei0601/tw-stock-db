@@ -1,8 +1,17 @@
-"""建置/刷新 `stock_groups` 名單股票的三大法人動態：近 3 年逐日歷史 + 近 5/20/60 日彙總。
+"""建置/刷新全市場股票的三大法人動態：近 3 年逐日歷史 + 近 5/20/60 日彙總。
 
 資料源：TWSE `fund/T86`（上市）+ TPEx `3itrade_hedge_result.php`（上櫃），官方按日期查詢
 endpoint（`collectors/institutional_official.py`），皆為「查一天、回全市場」，逐日往回抓
 才能湊歷史。
+
+**【第七輪】篩選範圍從 `stock_groups`（91 檔概念股）擴大為 `stocks` 全部（目前 1971
+檔）**：API 請求次數不變（endpoint 本來就回全市場），但先前寫入 DB 前就先篩選成 91 檔，
+原始回應中非 91 檔的部分沒有被保留，因此擴大範圍後無法用「這個日期已經抓過」跳過——
+必須區分「這個日期已經抓過『91 檔篩選版』」跟「這個日期已經抓過『全市場版』」是兩件
+不同的事。做法：`build()` 一開始偵測 `institutional_flow_daily` 現有資料涵蓋的相異股票數
+是否遠低於本次目標股票數，若是（判定為舊版窄範圍殘留），先清空
+`institutional_fetch_log`／`institutional_flow_daily`／`institutional_flow_summary`
+三張表再整個重新 backfill（不保留舊的「只有91檔」殘留資料，見 HANDOFF.md 第七輪決策）。
 
 **【第五輪】從「每次執行都整批重抓近 60 個交易日」改為「累積近 3 年（約 750 個交易日）
 的本地歷史 + 增量刷新」**：
@@ -96,12 +105,24 @@ def _now_iso() -> str:
 
 
 def _target_stocks(conn: sqlite3.Connection) -> list[tuple[str, str]]:
-    """回傳 [(stock_id, market), ...]，動態取自 stock_groups x stocks（不寫死清單）。"""
-    cur = conn.execute(
-        "SELECT DISTINCT s.stock_id, s.market FROM stock_groups g "
-        "JOIN stocks s ON g.stock_id = s.stock_id ORDER BY s.stock_id"
-    )
+    """回傳 [(stock_id, market), ...]。【第七輪】動態取自 stocks 全市場
+    （不再限定 stock_groups 概念股名單）。"""
+    cur = conn.execute("SELECT stock_id, market FROM stocks ORDER BY stock_id")
     return cur.fetchall()
+
+
+def _needs_full_rebuild(conn: sqlite3.Connection, target_stock_count: int) -> bool:
+    """偵測 institutional_flow_daily 是否還停留在舊版『只涵蓋 stock_groups 91 檔』的
+    篩選範圍（第七輪擴大為全市場前的殘留資料）。用『目前資料庫內已涵蓋的相異股票數』
+    遠低於本次目標股票數（抓 50% 當保守門檻，避免把「剛好抓到一半」的正常增量續傳
+    誤判成舊範圍殘留）來判斷。若判定為舊範圍資料，呼叫端會清空
+    institutional_fetch_log／institutional_flow_daily／institutional_flow_summary
+    三張表後整個重新 backfill（不保留舊的「只有91檔」殘留資料）。"""
+    cur = conn.execute("SELECT COUNT(DISTINCT stock_id) FROM institutional_flow_daily")
+    existing_stock_count = cur.fetchone()[0]
+    if existing_stock_count == 0:
+        return False  # 空表，走正常 backfill 即可，不需特別處理
+    return existing_stock_count < target_stock_count * 0.5
 
 
 def _fetch_log_bounds(conn: sqlite3.Connection, market: str) -> tuple[str | None, str | None]:
@@ -320,7 +341,17 @@ def build(db_path: Path, target_trading_days: int = TARGET_TRADING_DAYS) -> None
 
         targets = _target_stocks(conn)
         if not targets:
-            raise SystemExit("stock_groups 目前沒有任何股票，先確認 build_db.py 已建置族群資料")
+            raise SystemExit("stocks 表目前沒有任何股票，先確認 build_db.py 已執行")
+
+        if _needs_full_rebuild(conn, len(targets)):
+            print(f"[migration] 偵測到 institutional_flow_daily 仍是舊版窄範圍資料"
+                  f"（涵蓋股票數遠低於本次目標 {len(targets)} 檔），判定為第七輪擴大範圍前的殘留，"
+                  f"清空 institutional_fetch_log／institutional_flow_daily／"
+                  f"institutional_flow_summary 後全量重新 backfill（不保留舊的「只有91檔」資料）")
+            conn.execute("DELETE FROM institutional_fetch_log")
+            conn.execute("DELETE FROM institutional_flow_daily")
+            conn.execute("DELETE FROM institutional_flow_summary")
+            conn.commit()
 
         twse_ids = {sid for sid, market in targets if market == "TWSE"}
         tpex_ids = {sid for sid, market in targets if market == "TPEx"}
@@ -373,7 +404,7 @@ def build(db_path: Path, target_trading_days: int = TARGET_TRADING_DAYS) -> None
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="建置/刷新 stock_groups 名單股票的三大法人近 3 年歷史 + 近期彙總（官方 API 直抓，增量可續傳）")
+    parser = argparse.ArgumentParser(description="建置/刷新全市場股票的三大法人近 3 年歷史 + 近期彙總（官方 API 直抓，增量可續傳）")
     parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
     parser.add_argument(
         "--target-trading-days", type=int, default=TARGET_TRADING_DAYS,

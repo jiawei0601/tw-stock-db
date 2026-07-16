@@ -1,8 +1,9 @@
-"""建置/刷新 `stock_groups` 名單股票的月營收「近 3 年歷史」時序表。
+"""建置/刷新全市場股票的月營收「近 3 年歷史」時序表。
 
 取代 build_fundamentals.py 原本只抓「最新一期」的 monthly_revenue 快照做法（第三輪），
-改用 MOPS 歷史封存頁面（`collectors/revenue_history.py`）逐月逐市場抓取近 36 個月，
-只針對 `SELECT DISTINCT stock_id FROM stock_groups`（目前 91 檔，動態查詢不寫死）過濾。
+改用 MOPS 歷史封存頁面（`collectors/revenue_history.py`）逐月逐市場抓取近 36 個月。
+**【第七輪】篩選範圍從 `stock_groups`（91 檔概念股）擴大為 `stocks` 全部（目前 1971
+檔，動態查詢不寫死），MOPS 封存頁本身就是全市場下載，不需要新增任何請求。**
 
 **Schema 異動（破壞性）**：`monthly_revenue` PK 從 `stock_id`（單列快照）改為
 `(stock_id, ym)`（時序表）。首次執行偵測到舊版 schema 會自動 DROP 重建（backfill 本來
@@ -85,8 +86,31 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def _target_stock_ids(conn: sqlite3.Connection) -> list[str]:
-    cur = conn.execute("SELECT DISTINCT stock_id FROM stock_groups ORDER BY stock_id")
+    """【第七輪】改為全市場 stocks 表（不再限定 stock_groups 概念股名單）。"""
+    cur = conn.execute("SELECT stock_id FROM stocks ORDER BY stock_id")
     return [r[0] for r in cur.fetchall()]
+
+
+def _needs_full_rebuild(conn: sqlite3.Connection, target_stock_count: int) -> bool:
+    """偵測 monthly_revenue 是否還停留在舊版『只涵蓋 stock_groups 91 檔』的篩選範圍
+    （第七輪擴大為全市場前的殘留資料）。`revenue_fetch_log` 只記錄「這個市場+年月的
+    頁面是否已經抓過」，不記錄「當時用的是哪個篩選範圍」，若直接沿用舊 log 重跑，
+    「最近 2 個月強制重抓」以外的舊月份會被誤判成「已抓過」而跳過，導致舊月份繼續
+    停留在 91 檔範圍、只有最新月份是全市場範圍（本專案第七輪實測時真的踩到這個問題：
+    重跑一次後 34/35 個月仍是 87~88 檔，只有強制重抓的當月是 1839 檔）。用『扣掉最近
+    ALWAYS_REFRESH_MONTHS 個月，其餘月份的平均相異股票數』遠低於目標股票數（抓 50%
+    當保守門檻）來判斷，若判定為舊範圍資料，清空 monthly_revenue／revenue_fetch_log
+    後整個重新 backfill。"""
+    cur = conn.execute(
+        "SELECT COUNT(DISTINCT stock_id) FROM monthly_revenue "
+        "WHERE ym NOT IN (SELECT ym FROM monthly_revenue GROUP BY ym ORDER BY ym DESC LIMIT ?)",
+        (ALWAYS_REFRESH_MONTHS,),
+    )
+    row = cur.fetchone()
+    existing_stock_count = row[0] if row and row[0] is not None else 0
+    if existing_stock_count == 0:
+        return False  # 沒有「非最近幾個月」的舊資料，走正常 backfill 即可
+    return existing_stock_count < target_stock_count * 0.5
 
 
 def target_year_months(reference: date, n_months: int) -> list[tuple[int, int]]:
@@ -143,13 +167,21 @@ def build(db_path: Path, n_months: int = DEFAULT_MONTHS) -> None:
         _ensure_schema(conn)
         target_ids = set(_target_stock_ids(conn))
         if not target_ids:
-            raise SystemExit("stock_groups 目前沒有任何股票，先確認 build_db.py 已建置族群資料")
+            raise SystemExit("stocks 表目前沒有任何股票，先確認 build_db.py 已執行")
+
+        if _needs_full_rebuild(conn, len(target_ids)):
+            print(f"[migration] 偵測到 monthly_revenue 舊月份仍是窄範圍資料"
+                  f"（涵蓋股票數遠低於本次目標 {len(target_ids)} 檔），判定為第七輪擴大範圍前的殘留，"
+                  f"清空 monthly_revenue／revenue_fetch_log 後全量重新 backfill（不保留舊的「只有91檔」資料）")
+            conn.execute("DELETE FROM monthly_revenue")
+            conn.execute("DELETE FROM revenue_fetch_log")
+            conn.commit()
 
         today = date.today()
         candidates = target_year_months(today, n_months)
         always_refresh = set(candidates[:ALWAYS_REFRESH_MONTHS])
 
-        print(f"目標股票（來自 stock_groups DISTINCT stock_id）：{len(target_ids)} 檔")
+        print(f"目標股票（來自 stocks 全市場）：{len(target_ids)} 檔")
         print(f"目標年月：{len(candidates)} 個（{candidates[-1][0]}-{candidates[-1][1]:02d} ~ "
               f"{candidates[0][0]}-{candidates[0][1]:02d}），最近 {ALWAYS_REFRESH_MONTHS} 個月每次強制重抓")
 

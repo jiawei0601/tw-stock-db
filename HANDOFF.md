@@ -2,8 +2,10 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-16（第六輪：新增 `sector_flow_daily` 板塊資金流彙總表
-  + 三年板塊間資金流動關係分析，詳見下方第六輪紀錄）
+- 最後更新：Claude Code @ 2026-07-16（第七輪：`monthly_revenue`／`shareholding_
+  concentration`／`institutional_flow_daily`＋`institutional_flow_summary`／
+  `sector_flow_daily` 五張表的篩選範圍從 `stock_groups`（91 檔概念股）擴大為 `stocks`
+  全市場（1971 檔），詳見下方第七輪紀錄）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
@@ -142,43 +144,110 @@
       落差；電子零組件業出現「三年累計第二大流入 → 近60日轉為第二大流出」的訊號，
       可能反映資金從零組件供應鏈往半導體本業集中的輪動。板塊間相關性整體偏弱
       （多數 \|r\|<0.35），沒有找到強烈可操作的領先落後規律，報告中誠實記錄此結果。
-- 進行中（做到哪一步）：無，第六輪任務範圍內的項目已全部完成。
+  - **【第七輪】三種延伸資料（月營收/籌碼集中度/三大法人動態）從「只涵蓋 stock_groups
+    91 檔概念股」擴大為「涵蓋 stocks 全市場 1971 檔」**，`sector_flow_daily` 也同步從
+    91 檔橫跨的 13 個板塊擴大為全市場 34 個板塊：
+    - 修改 4 個 build 腳本的篩選白名單（`build_revenue_history.py`／
+      `build_fundamentals.py`／`build_institutional_summary.py` 的 `_target_stock_
+      ids`/`_target_stocks`，`build_sector_flow.py` 拿掉 `WHERE ... IN (SELECT ...
+      FROM stock_groups)` 子句），全部改查 `stocks` 表；collectors 本身（`revenue_
+      history.py`／`shareholding.py`／`institutional_official.py`）完全沒有改動
+      ——篩選邏輯原本就只存在於 build 腳本，不在 collector 裡，複查後確認不需要改。
+    - **實測踩到並修正一個真實 bug**：`build_revenue_history.py`／`build_institutional_
+      summary.py` 都用 fetch-log 表（`revenue_fetch_log`／`institutional_fetch_log`）
+      做「已抓過的日期/年月跳過」的可續傳設計，但這兩個 log 表只記錄「有沒有抓過」，
+      不記錄「當時用的是哪個篩選範圍」。改完篩選邏輯後直接重跑 `build_revenue_
+      history.py`，結果只有「強制重抓的最近 2 個月」變成全市場範圍，其餘 34 個舊月份
+      仍停留在舊版 87~88 檔（因為 log 顯示「已抓過」而被跳過，但當初寫入的資料是
+      篩選後的 91 檔子集，放寬篩選不會生出新資料）。修法：在兩個 build 腳本的 `build()`
+      開頭都加上 `_needs_full_rebuild()` 偵測（比對『扣掉最近強制重抓範圍外的舊資料
+      涵蓋股票數』是否遠低於本次目標股票數），判定為舊範圍殘留就整個清空對應表
+      （`monthly_revenue`／`revenue_fetch_log`，或 `institutional_flow_daily`／
+      `institutional_fetch_log`／`institutional_flow_summary`）後重新全量 backfill，
+      不嘗試「補洞」（部分月份/日期是舊範圍、部分是新範圍的資料庫是不可信的半殘狀態）。
+      詳見 `docs/data-sources.md` 第 14 節。
+    - **實測涵蓋率**：
+      - `monthly_revenue`：**1846/1971 檔（93.7%）**，35 個不同年月，62,633 列。
+        125 檔缺資料拆解：20 檔是 backfill 視窗（2023-08 起）後才掛牌的新股（預期內）；
+        **105 檔已掛牌但查無歷史，其中 104 檔是 `-KY` 境外發行人**（驗證第五輪僅用
+        91 檔樣本觀察到的「3 檔 -KY 系統性缺席」其實是全市場性的模式，MOPS 月營收
+        封存頁完全不含任何 `-KY` 發行人，見 `docs/data-sources.md` 第 15 節）；
+        剩 1 檔（3717 聯嘉投控）原因未查證，且不屬於「投控公司普遍缺席」模式（全市場
+        9 檔投控公司中 8 檔都有正常資料），如實記錄為單一未解釋缺口。
+      - `shareholding_concentration`：**1971/1971 檔（100%）**，TDCC 全市場一次性下載
+        天然涵蓋全部，無缺口。
+      - `institutional_flow_daily`：TWSE/TPEx 各 750/750 個交易日全數抓齊（backfill
+        期間偵測到舊版 91 檔殘留資料，先清空三張相關表才重新全量 backfill），共
+        **1,298,500 列**，涵蓋 `2023-06-13` ~ `2026-07-16`（約 3.1 年）。
+        `institutional_flow_summary`：**1970/1971 檔（99.9%）**，僅 `7814` 台亞半導
+        查無資料。
+      - `sector_flow_daily`：**34/34 個官方產業別板塊全數涵蓋**（上一輪 91 檔範圍下
+        只有 13 個），25,500 列（34 板塊 x 750 交易日），涵蓋期間與 `institutional_
+        flow_daily` 相同。
+    - **實測耗時**：`build_revenue_history.py`（含一次因舊範圍殘留而觸發的重跑）約
+      2.0 分鐘（72 次節流過的請求，MOPS 封存頁本身就是全市場下載，請求數不變）；
+      `build_fundamentals.py` 數秒（TDCC 全量下載，秒級完成）；`build_institutional_
+      summary.py` **64.8 分鐘**（750 交易日 x 2 市場節流過的請求，跟第五輪 91 檔版本
+      的 66.8 分鐘幾乎相同，證實請求數不變的預期，差異只是資料量從 6.8 萬列增加到
+      129.9 萬列）；`build_sector_flow.py` 秒級完成（純本地聚合）。全部四個 build
+      腳本合計約 67 分鐘。
+    - **全市場實測後出現過去 91 檔樣本從未觀察到的合法極端值**：
+      - `yoy_pct`/`mom_pct` 最高衝到 2526 萬%（`2528` 2024-12，去年同期營收基期僅
+        21 千元，微小波動被放大成天文數字，數學上完全自洽，非 bug）。
+      - 部分營建類股採比例完工法認列營收，當月營收本身可能是負數（`6024` 2026-05
+        `revenue=-244,632` 千元，備註明確說明會計原因），導致 `yoy_pct`/`mom_pct`
+        可以低於 -100%（91 檔樣本從未踩過這個情況）。
+      - 約 1%（20/1970 檔）股票的 `institutional_flow_summary.latest_date` 明顯落後
+        （例如 `3629` 地球磁力停留在 2025-07-08），合理推測是長期停牌/警示股，真實的
+        個股交易狀態，不是抓取邏輯 bug。
+      詳見 `docs/data-sources.md` 第 16-17 節。
+    - `tests/test_fundamentals_content.py`／`tests/test_sector_flow.py` 更新：覆蓋率
+      斷言的比較基準從 `stock_groups` 改為 `stocks`；`test_monthly_revenue_yoy_mom_
+      sane_range` 上下界從 ±2000% 放寬到 ±5000 萬%（容忍上述極端值，仍遠低於「營收
+      金額誤植進百分比欄位」的量級，足以攔住真正的欄位錯位）；
+      `test_institutional_flow_summary_freshness_consistent` 從「全部股票 <=5 天落差」
+      改為「至少 95% 股票落在 MAX(latest_date) 5 天內」；`test_sector_flow_covers_
+      all_industries_in_universe` 改成動態比對「stocks JOIN institutional_flow_daily
+      實際涵蓋的板塊數」（不寫死 34，因為個別板塊理論上可能剛好沒有任何交易日資料）。
+      全專案測試共 33 個（題數不變，只改斷言邏輯），全綠。
+    - `AGENTS.md`／`docs/data-sources.md` 同步更新（Interface Contract、架構圖、
+      build/run 說明），`stock_groups` 表本身未受影響、未被清空或修改，仍是有效的
+      概念股標記，只是不再是這三張延伸資料表的篩選依據。
+- 進行中（做到哪一步）：無，第七輪任務範圍內的項目已全部完成。
 - 下一步（下一個任務，非本次範圍）：
   1. **持續補充族群/概念股**：`stock_groups` 是人工整理/使用者提供資料，非官方來源，
      之後有新的族群清單可比照同樣模式（核對代號後 `INSERT OR REPLACE`）繼續累積，
-     不需改 schema。`build_revenue_history.py`/`build_fundamentals.py`/
-     `build_institutional_summary.py`/`build_sector_flow.py` 都是動態查詢
-     `stock_groups`，族群名單擴充後直接重跑即可自動涵蓋新股票，不需改程式（但新股票
-     首次加入時月營收/三大法人動態都要重新 backfill 近 3 年歷史，會產生跟第一次
-     backfill 同等級的請求量與耗時，不是免費的）。
-  2. **擴大板塊資金流分析到全市場 1971 檔**（若使用者需要真正的全市場板塊輪動圖，
-     不只是電子供應鏈內部）：把 `institutional_flow_daily` 的 backfill 範圍從
-     `stock_groups`（91 檔）擴大到 `stocks`（全部 1971 檔）。**API 請求次數不變**
-     （T86／TPEx 端點本來就是「查一天回全市場」，只是目前寫入時篩選成 91 檔，
-     擴大範圍只需放寬篩選條件，不需要更多網路請求），但儲存量會從 6.8 萬列增加到
-     約 148 萬列（91→1971 檔，約 21 倍），估計仍需完整跑一次 60-70 分鐘的長迴圈
-     （因為篩選邏輯在寫入端，仍要重新逐日查詢）。完成後 `sector_flow_daily` 也要
-     重新設計覆蓋範圍（拿掉 `WHERE f.stock_id IN (SELECT ... FROM stock_groups)`
-     這個限制子句）。
-  3. **把一次性板塊流動分析沉澱成可重跑腳本**：`analysis/sector-flow-2026-07-16.md`
+     不需改 schema。**【第七輪起】不再需要重新 backfill**：`build_revenue_history.py`
+     /`build_fundamentals.py`/`build_institutional_summary.py`/`build_sector_flow.py`
+     現在都是動態查詢 `stocks` 全市場（不再是 `stock_groups`），族群名單擴充只是替
+     既有的全市場資料多加一個「概念股標記」，只要新股票代號本身已經在 `stocks` 表裡，
+     它的月營收/籌碼集中度/三大法人動態早就已經被涵蓋，不需要為 `stock_groups` 擴充
+     再跑一次 backfill（這是第七輪帶來的附加好處，`stock_groups` 從此變成純標記表，
+     跟延伸資料表的 backfill 範圍完全解耦）。
+  2. **把一次性板塊流動分析沉澱成可重跑腳本**：`analysis/sector-flow-2026-07-16.md`
      的相關係數/lead-lag/累計排行計算目前只是分析當下跑的 pandas script，沒有存成
-     repo 裡的腳本。若要定期更新這份分析（例如每週看一次最新的板塊輪動狀況），
-     需要把分析邏輯寫成 `analyze_sector_flow.py` 之類的腳本，這次沒有做（使用者
-     要的是「這次先看能不能整合出結果」，不是「做成常態化分析工具」）。
-  4. **視覺化網頁**：讀 `data/tw_stocks.db` 的 `stocks` + `stock_groups` +
-     `monthly_revenue`（近 3 年時序）+ `shareholding_concentration` +
-     `institutional_flow_summary`/`institutional_flow_daily`（近 3 年時序）+
-     `sector_flow_daily`（板塊彙總）做「資金流向依板塊/族群」儀表板。六輪任務都
-     完全沒有動這塊，現在資料底層（含板塊彙總）都已經到位。
-  5. **定期刷新排程**：`build_db.py` 與 `build_fundamentals.py`（籌碼集中度）仍是
-     整批快照覆蓋，可任意頻率重跑。`build_revenue_history.py` 與
-     `build_institutional_summary.py` 第五輪起都已改成增量式，重跑成本低（前者最近
-     2 個月強制重抓 + 新月份自動涵蓋、後者只抓比本地最新日期更新的新交易日），
-     **建議排程每日跑一次**（比照 tw-momentum-scanner 用 Windows 排程或 cron），
-     每日增量成本：月營收約數秒（除非剛好是新月份第一次公告當天才會抓多一點）、
-     三大法人約數十秒（1~2 個新交易日 x 2 市場）。**首次歷史 backfill 已經在本輪
-     做完，之後不需要再手動觸發長跑**，除非未來擴大 `stock_groups` 名單（見上方第 1
-     點）或想拉長歷史視窗（改 `--target-trading-days`/`--months` 參數）。
+     repo 裡的腳本，而且分析範圍還停留在第六輪的 91 檔/13 板塊。若要定期更新這份
+     分析（例如每週看一次最新的板塊輪動狀況），需要把分析邏輯寫成
+     `analyze_sector_flow.py` 之類的腳本，**且應該用第七輪的全市場 34 板塊資料重新
+     跑一次分析**（91 檔/13 板塊版本的結論只代表電子供應鏈內部，現在資料底層已經
+     支援真正的全市場板塊輪動分析，值得重新產出報告）。這次沒有做（超出本輪任務
+     「先把資料底層擴大到全市場」的範圍）。
+  3. **視覺化網頁**：讀 `data/tw_stocks.db` 的 `stocks` + `stock_groups` +
+     `monthly_revenue`（近 3 年時序，全市場）+ `shareholding_concentration`
+     （全市場）+ `institutional_flow_summary`/`institutional_flow_daily`（近 3 年
+     時序，全市場）+ `sector_flow_daily`（全市場 34 板塊彙總）做「資金流向依板塊/
+     族群」儀表板。七輪任務都完全沒有動這塊，現在資料底層（含全市場板塊彙總）都已
+     到位，是目前唯一還沒開始的大項。
+  4. **定期刷新排程**：`build_db.py` 與 `build_fundamentals.py`（籌碼集中度）仍是
+     整批快照覆蓋，可任意頻率重跑（籌碼集中度全市場實測仍是秒級完成）。
+     `build_revenue_history.py` 與 `build_institutional_summary.py` 都已改成增量式，
+     重跑成本低（前者最近 2 個月強制重抓 + 新月份自動涵蓋、後者只抓比本地最新日期
+     更新的新交易日），**建議排程每日跑一次**（比照 tw-momentum-scanner 用 Windows
+     排程或 cron），每日增量成本：月營收約數秒（除非剛好是新月份第一次公告當天才會
+     抓多一點）、三大法人約數十秒~1 分鐘（1~2 個新交易日 x 2 市場，全市場資料量比
+     91 檔版本大，但仍是同一組節流請求數，增量成本量級不變）。**第七輪的全市場歷史
+     backfill 已經做完，之後不需要再手動觸發長跑**，除非未來想拉長歷史視窗（改
+     `--target-trading-days`/`--months` 參數）。
 - 關鍵決策 + 為什麼：
   - **主要產業別來源用 ISIN HTML 頁面而非 TWSE OpenAPI JSON**：OpenAPI
     (`t187ap03_L`/`mopsfin_t187ap03_O`) 的產業別欄位只有兩碼數字代碼（如 "24"），
@@ -247,13 +316,34 @@
     門檻（例如改看 >600張）就要重新抓資料；`levels_json` 把 15 級距完整明細都留著，
     换門檻只要重新查詢 JSON 就好，不必重新打 TDCC API（反正 CSV 本身就是全市場一次
     下載，多存幾個欄位幾乎不增加成本）。
-  - **【第六輪】板塊資金流分析範圍維持 91 檔 universe，沒有先擴大到全市場**：一開始
-    發現 91 檔只橫跨全市場 34 個板塊中的 13 個、且高度集中在電子供應鏈，曾用
-    AskUserQuestion 詢問使用者是否要先花 60-70 分鐘擴大到全市場 1971 檔再分析，
-    使用者選擇「先用現有 91 檔分析，範圍限定在電子/半導體供應鏈內部板塊」。因此
-    `sector_flow_daily` 與 `analysis/sector-flow-2026-07-16.md` 的結論**只代表電子
-    供應鏈內部的資金輪動，不是全市場板塊輪動**，報告開頭已用粗體標注這個限制，
-    未來若要看金融/傳產/生技等板塊，需要先做上方下一步第 2 點的全市場擴大。
+  - **【第六輪，已隨第七輪擴大，僅供歷史考證】板塊資金流分析範圍維持 91 檔 universe，
+    沒有先擴大到全市場**：一開始發現 91 檔只橫跨全市場 34 個板塊中的 13 個、且高度
+    集中在電子供應鏈，曾用 AskUserQuestion 詢問使用者是否要先花 60-70 分鐘擴大到
+    全市場 1971 檔再分析，使用者當時選擇「先用現有 91 檔分析，範圍限定在電子/半導體
+    供應鏈內部板塊」。**第七輪已完成全市場擴大**（`sector_flow_daily` 現在涵蓋
+    34/34 個官方產業別板塊），`analysis/sector-flow-2026-07-16.md` 報告本身仍是
+    91 檔/13 板塊版本的舊分析、尚未重新產出（見上方下一步第 2 點），使用報告結論時
+    仍要注意這個限制，但**資料底層本身已經是全市場範圍**。
+  - **【第七輪】三種延伸資料 + 板塊彙總從 `stock_groups` 擴大為 `stocks` 全市場**：
+    使用者明確指示這是「改既有邏輯的篩選範圍，不是研究新資料源」，collector 本身
+    （`revenue_history.py`／`shareholding.py`／`institutional_official.py`）都已在
+    先前輪次驗證過可用、不需重新摸索欄位格式，本輪複查後確認篩選邏輯完全只存在於
+    4 個 build 腳本的 `_target_stock_ids`/`_target_stocks` 函式與 `build_sector_
+    flow.py` 的 SQL WHERE 子句，collector 完全不用改，縮小了本輪的改動面。
+  - **【第七輪】三大法人／月營收 backfill 選擇「清空重建」而非「補洞式續傳」**：
+    fetch-log 式可續傳表（`revenue_fetch_log`／`institutional_fetch_log`）只記錄
+    「日期/年月是否已查過」，不記錄「當時篩選範圍」，擴大範圍後若試圖只補「舊範圍
+    以外」的資料會需要對同一天/同一月重複判斷兩種不同語意的「已抓過」，複雜度不划算
+    （對照組：全部重新 backfill 只需要多花跟第一次 backfill 相同的時間，91→1971 檔
+    版本實測 64.8 分鐘 vs 第五輪 91 檔版本 66.8 分鐘，幾乎沒有額外時間成本，因為
+    API 請求次數本來就不隨篩選範圍變化）。因此選擇「偵測到舊範圍殘留就整個清空重建」
+    這個更簡單、更不容易留下半殘資料的做法，取代「嘗試只補洞」。
+  - **【第七輪】測試斷言的極端值容忍上限刻意設得很寬（±5000 萬%），不是縮緊**：
+    全市場實測後出現的極端 `yoy_pct`/`mom_pct`（最高 2526 萬%）都經過交叉核對確認是
+    真實資料（基期極小/會計調整所致），不是 parsing bug。測試的核心目的是「防欄位
+    錯位」（例如營收金額誤植進百分比欄位），revenue 欄位量級是 10^8~10^9，只要上限
+    設在遠低於這個量級但高於實際觀察到的極端值（5000 萬 = 5x10^7）就仍能攔住真正的
+    bug，同時不會因為全市場的合法極端值而產生假警報。
 - 雷區 / 別碰：
   - ISIN 頁面編碼**必須**手動指定 `resp.encoding = "cp950"`（不是 `"big5"`——Python
     標準 `'big5'` codec 不含「碁」等擴充字集字元，會 decode 失敗或被 requests 靜默轉成
@@ -321,20 +411,49 @@
     0 bytes**，跟其他「查無資料」月份（會回約 871 bytes、內文含「查無資料」字樣）
     不同，重試 3 次結果一致，判斷是該站台這個月資料的已知缺口，不是暫時性網路問題，
     也不是 parsing bug。`monthly_revenue` 因此只涵蓋 35/36 個目標月份，屬預期落差。
+  - **【第七輪】fetch-log 式可續傳腳本擴大篩選範圍後，直接重跑不會自動涵蓋全部**：
+    `revenue_fetch_log`／`institutional_fetch_log` 只記錄「日期/年月是否已抓過」，
+    不記錄「當時的篩選範圍」。改完 `_target_stock_ids`/`_target_stocks` 後如果沒有
+    同步處理這個問題就直接重跑，結果只有「強制重抓範圍」（月營收最近 2 個月/三大
+    法人新增交易日）會是全市場範圍，其餘舊資料仍停留在舊範圍，且不會有任何錯誤訊息
+    （本專案第七輪實測真的踩到：`build_revenue_history.py` 改完篩選邏輯重跑一次後，
+    35 個月裡有 34 個月仍是 87~88 檔的舊範圍）。修法見上方「關鍵決策」第七輪
+    「清空重建」條目與 `docs/data-sources.md` 第 14 節；**這類「篩選範圍變動 + 
+    fetch-log 可續傳設計」組合以後如果再出現，預設就要清空重建，不要嘗試補洞**。
+  - **【第七輪】MOPS 月營收封存頁面系統性缺席清單從 3 檔擴大確認為 104 檔 `-KY` 股**：
+    第五輪只用 91 檔樣本觀察到 3 檔（`3665`／`3673`／`4977`），全市場實測後確認這是
+    **系統性模式，不是這 3 檔特例**：全市場 105 檔「已掛牌但查無月營收歷史」的股票中
+    104 檔都是 `-KY` 境外發行人（唯一例外是 `3717` 聯嘉投控，原因未查證），MOPS 封存
+    頁面系列完全不含任何 `-KY` 發行人。見 `docs/data-sources.md` 第 15 節。
+  - **【第七輪】全市場 `yoy_pct`/`mom_pct` 可能出現天文數字量級的極端值，且可能低於
+    -100%**：91 檔概念股樣本從未出現過的兩種真實情況：(1) 去年同期營收基期接近 0
+    的小型/殼公司，微小波動被放大成幾百萬%甚至幾千萬% YoY（例如 `2528` 實測
+    25,266,600%）；(2) 部分營建類股採比例完工法認列營收，會計調整可能讓當月營收本身
+    變成負數，導致 `yoy_pct`/`mom_pct` 低於 -100%（例如 `6024` 實測 -200.5%）。兩者
+    都經過交叉核對（revenue 原始值 + 官方公告備註）確認是真實資料，不是 bug。日後
+    若在這兩個欄位上寫新的驗證邏輯，**不能假設 -100% 是下界、也不能用低上限卡數值**，
+    見 `docs/data-sources.md` 第 16 節。
 - 怎麼跑 / 怎麼測：
   ```bash
   cd C:\CLAUDE\investing\tw-stock-db
   pip install -r requirements.txt
   python build_db.py                       # 整批刷新 stocks + stock_groups
-  python build_revenue_history.py          # 91 檔月營收近 3 年歷史（首次全量約 2 分鐘，
-                                            # 之後重跑增量，數秒~數十秒）
-  python build_fundamentals.py             # 91 檔籌碼集中度快照
-  python build_institutional_summary.py    # 91 檔三大法人近 3 年歷史 + 近期彙總（TWSE T86
-                                            # + TPEx hedge_result.php 官方 API，首次全量約
-                                            # 60-70 分鐘，之後重跑增量，數十秒內完成；
+  python build_revenue_history.py          # 【第七輪起全市場 1971 檔】月營收近 3 年歷史
+                                            # （首次全量/偵測到舊範圍殘留時約 2 分鐘，
+                                            # 之後日常重跑增量，數秒~數十秒）
+  python build_fundamentals.py             # 【第七輪起全市場 1971 檔】籌碼集中度快照
+                                            # （TDCC 全量下載，秒級完成）
+  python build_institutional_summary.py    # 【第七輪起全市場 1971 檔】三大法人近 3 年
+                                            # 歷史 + 近期彙總（TWSE T86 + TPEx
+                                            # hedge_result.php 官方 API，首次全量/偵測到
+                                            # 舊範圍殘留時約 60-70 分鐘（實測 64.8 分鐘），
+                                            # 之後日常重跑增量，數十秒~1 分鐘內完成；
                                             # 中途中斷可直接重跑，會從資料庫現有進度接續）
-  python -m pytest tests/ -q               # 驗證資料庫內容（28 個測試）
+  python build_sector_flow.py              # 【第七輪起全市場】板塊資金流彙總（純本地
+                                            # 聚合，秒級完成，依賴上一步已跑過）
+  python -m pytest tests/ -q               # 驗證資料庫內容（33 個測試）
   ```
   **注意**：`build_revenue_history.py` 與 `build_institutional_summary.py` 都不要跟
-  其他 build 腳本同時併發執行（見上方 SQLite 單寫入者雷區）；四個 build 腳本本身
-  彼此獨立，依序（或任意非併發順序）重跑都安全。
+  其他 build 腳本同時併發執行（見上方 SQLite 單寫入者雷區）；五個 build 腳本本身
+  彼此獨立，依序（或任意非併發順序）重跑都安全，但 `build_sector_flow.py` 依賴
+  `build_institutional_summary.py` 已有資料。

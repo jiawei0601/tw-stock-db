@@ -1,9 +1,9 @@
-"""建置/刷新 `stock_groups` 名單股票的籌碼集中度快照。
+"""建置/刷新全市場股票的籌碼集中度快照。
 
-延伸自 build_db.py 的同一個資料庫（`data/tw_stocks.db`），但只覆蓋 `SELECT DISTINCT
-stock_id FROM stock_groups` 這批股票（目前 91 檔，動態查詢，不寫死清單），不對整個
-1971 檔股票宇宙跑（TDCC 全量下載一次即可涵蓋，無需逐檔打 API，見
-collectors/shareholding.py 說明）。
+延伸自 build_db.py 的同一個資料庫（`data/tw_stocks.db`）。**【第七輪】篩選範圍從
+`stock_groups`（91 檔概念股）擴大為 `stocks` 全部（目前 1971 檔，動態查詢，不寫死
+清單）——TDCC 全量下載本身就是全市場一次性下載，不需要逐檔打 API，也不需要新增任何
+請求，見 collectors/shareholding.py 說明。
 
 跟 build_db.py 一樣是**整批快照覆蓋**（不是逐筆 upsert）：`shareholding_concentration`
 表由本腳本完全擁有，每次執行先清空再整批寫入，天然會讓「已從 stock_groups 移除的股票」
@@ -61,8 +61,8 @@ def _now_iso() -> str:
 
 
 def _target_stock_ids(conn: sqlite3.Connection) -> list[str]:
-    """動態取自 stock_groups，不寫死清單（族群名單未來可能擴充）。"""
-    cur = conn.execute("SELECT DISTINCT stock_id FROM stock_groups ORDER BY stock_id")
+    """【第七輪】動態取自 stocks 全市場（不再限定 stock_groups 概念股名單）。"""
+    cur = conn.execute("SELECT stock_id FROM stocks ORDER BY stock_id")
     return [r[0] for r in cur.fetchall()]
 
 
@@ -143,10 +143,10 @@ def main() -> None:
     finally:
         conn.close()
     if not target_ids:
-        raise SystemExit("stock_groups 目前沒有任何股票，先確認 build_db.py 已建置族群資料")
+        raise SystemExit("stocks 表目前沒有任何股票，先確認 build_db.py 已執行")
     target_set = set(target_ids)
 
-    print(f"目標股票（來自 stock_groups DISTINCT stock_id）：{len(target_ids)} 檔")
+    print(f"目標股票（來自 stocks 全市場）：{len(target_ids)} 檔")
 
     print("\n=== 抓取籌碼集中度（TDCC 股權分散表）===")
     shareholding_rows, shareholding_missing = build_shareholding_rows(target_set)

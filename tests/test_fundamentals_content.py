@@ -1,6 +1,10 @@
 """驗證 build_revenue_history.py / build_fundamentals.py / build_institutional_summary.py
 產出的表內容是否合理。
 
+**【第七輪】篩選範圍從 `stock_groups`（91 檔概念股）擴大為 `stocks` 全市場（目前 1971
+檔）**，本檔測試的 `target_stock_ids` fixture 與覆蓋率斷言已同步改為驗證全市場涵蓋率
+（見 HANDOFF.md 第七輪紀錄），`stock_groups` 表本身未受影響，仍是有效的概念股子集標記。
+
 跟 test_db_content.py 同樣原則：不重新打網路 API，只驗證 `data/tw_stocks.db` 裡已經寫好
 的內容。跑測試前必須先跑過：
     python build_db.py
@@ -44,7 +48,8 @@ def conn():
 
 @pytest.fixture(scope="module")
 def target_stock_ids(conn) -> set[str]:
-    cur = conn.execute("SELECT DISTINCT stock_id FROM stock_groups")
+    """【第七輪】全市場 stocks 表（不再限定 stock_groups 91 檔概念股名單）。"""
+    cur = conn.execute("SELECT stock_id FROM stocks")
     return {r[0] for r in cur.fetchall()}
 
 
@@ -110,18 +115,31 @@ def test_monthly_revenue_known_stock_2330(conn):
 
 
 def test_monthly_revenue_yoy_mom_sane_range(conn):
-    """量級合理性檢查：YoY/MoM 是百分比數字，不應是股數或營收金額誤植（防欄位錯位）。"""
+    """量級合理性檢查：YoY/MoM 是百分比數字，不應是股數或營收金額誤植（防欄位錯位）。
+
+    【第七輪】範圍從 91 檔概念股（皆為流動性佳的大中型股）擴大為全市場 1971 檔後，
+    實測出現許多合法的極端值：
+    - 去年同期營收基期接近 0 的小型/殼公司，稍有起色就是幾千%甚至幾百萬% YoY/MoM
+      （例如 2528 實測 2024-12 yoy_pct=25,266,600.0%，去年同期營收僅 21 千元、
+      當月營收 5,306,007 千元，數字內部邏輯自洽，不是 bug）。
+    - 部分營建類股採比例完工法認列營收，會計調整可能讓當月營收本身為負數，
+      造成 yoy_pct/mom_pct 低於 -100%（例如 6024 實測 2026-05 revenue=-244,632 千元、
+      yoy_pct=-200.5%，備註明確說明「工程收入按套裝設備比例分攤」的會計原因）。
+    因此不能再假設 revenue 恆為正、也不能用低上限去卡百分比，改用遠低於「營收金額
+    誤植進百分比欄位」量級（本表 revenue 欄位實測量級上看 10^8~10^9 千元）的寬鬆
+    絕對值上限（正負 5000 萬%），仍足以攔住真正的欄位錯位。"""
     cur = conn.execute(
         "SELECT stock_id, ym, yoy_pct, mom_pct FROM monthly_revenue "
         "WHERE yoy_pct IS NOT NULL OR mom_pct IS NOT NULL"
     )
     rows = cur.fetchall()
     assert rows, "monthly_revenue 沒有任何 yoy_pct/mom_pct 資料"
+    bound = 50_000_000
     for stock_id, ym, yoy_pct, mom_pct in rows:
         if yoy_pct is not None:
-            assert -100 <= yoy_pct <= 2000, f"{stock_id} {ym} yoy_pct 超出合理範圍: {yoy_pct}"
+            assert -bound <= yoy_pct <= bound, f"{stock_id} {ym} yoy_pct 超出合理範圍: {yoy_pct}"
         if mom_pct is not None:
-            assert -100 <= mom_pct <= 2000, f"{stock_id} {ym} mom_pct 超出合理範圍: {mom_pct}"
+            assert -bound <= mom_pct <= bound, f"{stock_id} {ym} mom_pct 超出合理範圍: {mom_pct}"
 
 
 def test_monthly_revenue_no_orphan_rows(conn):
@@ -211,15 +229,29 @@ def test_institutional_flow_summary_covers_most_target_stocks(conn, target_stock
 
 
 def test_institutional_flow_summary_freshness_consistent(conn):
-    """本輪任務的核心目的：改用官方 API 直抓後，91 檔的資料新鮮度應一致（同一批最近交易日），
-    不應再出現「71 檔是近日資料、20 檔是舊資料」的不一致情況。個別股票可能因當日停牌等原因
-    latest_date 略舊，容許小範圍（<=5 個日曆日）差異，但不應出現大範圍新鮮度落差。"""
-    cur = conn.execute("SELECT MIN(latest_date), MAX(latest_date) FROM institutional_flow_summary")
-    min_date, max_date = cur.fetchone()
+    """本輪任務的核心目的（第四輪確立）：改用官方 API 直抓後，資料新鮮度應一致（同一批
+    最近交易日），不應再出現「一部分是近日資料、一部分是舊資料」的不一致情況。
+
+    【第七輪】範圍擴大為全市場 1971 檔後，實測出現少數個位數/十位數檔（例如 3629
+    地球磁力，latest_date 停留在 2025-07-08）long-term 停牌/警示股，這是真實的個股
+    交易狀態，不是抓取邏輯的 bug——91 檔概念股皆為主動選股的流動性佳個股，天然不會
+    踩到這個情況，但全市場必然涵蓋少數這種股票。改用「絕大多數股票新鮮度一致」
+    （>=95% 落在離 MAX(latest_date) 5 個日曆日內）取代「全部股票都要在 5 天內」，
+    保留原本「偵測系統性新鮮度落差（例如抓取邏輯又退化成只更新一部分股票）」的核心
+    驗證目的，同時容忍全市場必然存在的少數停牌股。"""
+    cur = conn.execute("SELECT MIN(latest_date), MAX(latest_date), COUNT(*) FROM institutional_flow_summary")
+    min_date, max_date, total = cur.fetchone()
     assert min_date is not None and max_date is not None
-    from datetime import date as _date
-    gap_days = (_date.fromisoformat(max_date) - _date.fromisoformat(min_date)).days
-    assert gap_days <= 5, f"latest_date 落差過大（{min_date} ~ {max_date}），資料新鮮度不一致"
+    from datetime import date as _date, timedelta as _timedelta
+    threshold = (_date.fromisoformat(max_date) - _timedelta(days=5)).isoformat()
+    fresh = conn.execute(
+        "SELECT COUNT(*) FROM institutional_flow_summary WHERE latest_date >= ?", (threshold,)
+    ).fetchone()[0]
+    ratio = fresh / total
+    assert ratio >= 0.95, (
+        f"新鮮度落在 MAX(latest_date) 5 天內的比例過低（{fresh}/{total}={ratio:.2%}），"
+        f"latest_date 範圍 {min_date} ~ {max_date}，疑似抓取邏輯退化成只更新部分股票"
+    )
 
 
 def test_institutional_flow_known_stock_2330(conn):

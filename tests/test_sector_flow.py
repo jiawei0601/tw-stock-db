@@ -1,4 +1,8 @@
-"""驗證 sector_flow_daily 是否正確從 institutional_flow_daily 依 industry_name 聚合。"""
+"""驗證 sector_flow_daily 是否正確從 institutional_flow_daily 依 industry_name 聚合。
+
+【第七輪】範圍從 stock_groups（91 檔概念股橫跨的 13 個板塊）擴大為全市場 stocks 表
+（理論上應涵蓋 stocks 表中實際存在的板塊數，動態查詢，不寫死板塊數量，因為近 3 年
+三大法人資料裡可能剛好有些板塊完全沒有任何交易日資料）。"""
 from __future__ import annotations
 
 import sqlite3
@@ -24,11 +28,12 @@ def test_sector_flow_table_exists_and_populated(conn):
 
 
 def test_sector_flow_covers_all_industries_in_universe(conn):
-    """stock_groups 名單橫跨的板塊數應與 sector_flow_daily 一致。"""
+    """全市場 stocks 表橫跨的板塊數應與 sector_flow_daily 一致（動態查詢，不寫死板塊數，
+    因為個別板塊可能剛好在近 3 年三大法人資料裡完全沒有任何交易日資料）。"""
     n_industries = conn.execute(
         "SELECT COUNT(DISTINCT s.industry_name) FROM stocks s "
-        "WHERE s.stock_id IN (SELECT DISTINCT stock_id FROM stock_groups) "
-        "AND s.industry_name IS NOT NULL"
+        "JOIN institutional_flow_daily f ON f.stock_id = s.stock_id "
+        "WHERE s.industry_name IS NOT NULL"
     ).fetchone()[0]
     n_covered = conn.execute("SELECT COUNT(DISTINCT industry_name) FROM sector_flow_daily").fetchone()[0]
     assert n_covered == n_industries
@@ -55,8 +60,7 @@ def test_sector_flow_sum_matches_institutional_flow_daily(conn):
     expected = conn.execute(
         "SELECT SUM(f.foreign_net) FROM institutional_flow_daily f "
         "JOIN stocks s ON s.stock_id = f.stock_id "
-        "WHERE s.industry_name='半導體業' AND f.date=? "
-        "AND f.stock_id IN (SELECT DISTINCT stock_id FROM stock_groups)",
+        "WHERE s.industry_name='半導體業' AND f.date=?",
         (sample_date,),
     ).fetchone()[0]
     actual = conn.execute(

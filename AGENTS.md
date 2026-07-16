@@ -6,9 +6,11 @@
 ## 專案定位
 
 台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）標記、族群/概念股
-人工標記（`stock_groups`），以及針對 `stock_groups` 名單股票的月營收/籌碼集中度/三大
-法人動態三種延伸資料。個人投資用途，為未來「資金流向依板塊/族群視覺化網頁」鋪路的
-資料底層。**視覺化網頁本身不在任何一輪任務範圍內**，見 HANDOFF.md 下一步。
+人工標記（`stock_groups`），以及**【第七輪起】全市場**（`stocks` 表全部，目前 1971 檔）
+股票的月營收/籌碼集中度/三大法人動態三種延伸資料。個人投資用途，為未來「資金流向依
+板塊/族群視覺化網頁」鋪路的資料底層。**視覺化網頁本身不在任何一輪任務範圍內**，見
+HANDOFF.md 下一步。`stock_groups`（91 檔概念股標記）仍是有效資料，可用於未來「篩選出
+概念股子集」的查詢用途，但不再是這三張延伸資料表的篩選範圍。
 
 ## 專案慣例
 
@@ -24,37 +26,42 @@
 - build / run：
   - `python build_db.py [--db-path PATH]`（`stocks` + `stock_groups` 表整批刷新，
     idempotent，重跑安全，預設寫入 `data/tw_stocks.db`）。
-  - `python build_revenue_history.py [--db-path PATH] [--months N]`（**【第五輪】**
-    `monthly_revenue` 表，只針對 `stock_groups` 名單股票，動態查詢不寫死清單；改用
-    MOPS 歷史封存頁面逐月逐市場抓取近 3 年（預設 36 個月），PK 為 `(stock_id, ym)`
-    時序表；可續傳：`revenue_fetch_log` 表記錄已抓過的「市場+年月」，重跑會跳過已抓
-    月份（最近 2 個月每次強制重抓），單月頁面失敗跳過繼續、不中止整體 backfill。
-    首次全量 backfill 約需 2 分鐘（72 次節流過的請求：36 個月 x 2 市場）。
-  - `python build_fundamentals.py [--db-path PATH]`（**【第五輪】只剩**
-    `shareholding_concentration` 表，只針對 `stock_groups` 名單股票，動態查詢不寫死
-    清單，整批快照覆蓋，idempotent；月營收已搬到 `build_revenue_history.py`，見上）。
+  - `python build_revenue_history.py [--db-path PATH] [--months N]`（**【第七輪起】
+    篩選範圍改為 `stocks` 全市場**，目前 1971 檔，動態查詢不寫死清單；MOPS 歷史封存
+    頁面逐月逐市場抓取近 3 年（預設 36 個月），PK 為 `(stock_id, ym)` 時序表；可續傳：
+    `revenue_fetch_log` 表記錄已抓過的「市場+年月」，重跑會跳過已抓月份（最近 2 個月
+    每次強制重抓），單月頁面失敗跳過繼續、不中止整體 backfill。首次全量 backfill 約需
+    2 分鐘（72 次節流過的請求：36 個月 x 2 市場）。**內建舊範圍偵測**：若偵測到非最近
+    幾個月的資料仍是舊版窄範圍（第七輪擴大前只涵蓋 91 檔），會自動清空
+    `monthly_revenue`／`revenue_fetch_log` 後整個重新 backfill，不會誤判成「已抓過」
+    而跳過（這是第七輪實測時真的踩到的坑，見 HANDOFF.md 第七輪紀錄）。
+  - `python build_fundamentals.py [--db-path PATH]`（**【第七輪起】篩選範圍改為
+    `stocks` 全市場**，目前 1971 檔，動態查詢不寫死清單，`shareholding_concentration`
+    表整批快照覆蓋，idempotent；月營收已搬到 `build_revenue_history.py`，見上）。
   - `python build_institutional_summary.py [--db-path PATH] [--target-trading-days N]`
-    （**【第五輪】** `institutional_flow_summary` + `institutional_flow_daily` 表，用
-    TWSE `fund/T86` ＋ TPEx `3itrade_hedge_result.php` 官方按日期查詢 endpoint，
-    `institutional_flow_daily` 從「近 60 個交易日快照覆蓋」改為「近 3 年（預設 750 個
-    交易日）累積式時序表 + 增量刷新」，只針對 `stock_groups` 名單股票；`institutional_
+    （**【第七輪起】篩選範圍改為 `stocks` 全市場**，目前 1971 檔；用 TWSE `fund/T86`
+    ＋ TPEx `3itrade_hedge_result.php` 官方按日期查詢 endpoint，`institutional_flow_daily`
+    是近 3 年（預設 750 個交易日）累積式時序表 + 增量刷新；`institutional_
     flow_summary`（5/20/60 日彙總 + streak）計算邏輯不變，但改讀本地
     `institutional_flow_daily`，不再對外重複發送請求。可續傳：`institutional_fetch_log`
     表記錄已查過的「市場+日期」，每湊滿 20 個交易日就 commit 一次，單日失敗跳過繼續、
     不中止整體 backfill；首次全量 backfill 約需 60-70 分鐘（750 交易日 x 2 市場節流過
     的請求），之後重跑只抓增量新交易日，通常數十秒內完成。**不讀取**
-    `C:\CLAUDE\tw_cache\institutional.db`，見下方第四輪決策。
+    `C:\CLAUDE\tw_cache\institutional.db`，見下方第四輪決策。**內建舊範圍偵測**：若
+    偵測到 `institutional_flow_daily` 涵蓋的相異股票數遠低於目標股票數（判定為第七輪
+    擴大前只涵蓋 91 檔的殘留資料），會自動清空 `institutional_fetch_log`／
+    `institutional_flow_daily`／`institutional_flow_summary` 後整個重新 backfill。
     **注意：backfill 進行中請勿同時對同一個 `data/tw_stocks.db` 跑其他 build 腳本**
     （SQLite 單寫入者限制，長跑期間持有未 commit 的交易會讓其他寫入直接
     `database is locked`，見 `docs/data-sources.md` 第 12 節）。
-  - `python build_sector_flow.py [--db-path PATH]`（**【第六輪】** `sector_flow_daily`
+  - `python build_sector_flow.py [--db-path PATH]`（**【第七輪起】** `sector_flow_daily`
     表，從本地 `institutional_flow_daily` JOIN `stocks.industry_name` 聚合每個板塊每日
-    三大法人買賣超合計，只涵蓋 `stock_groups` 名單（91 檔）橫跨的板塊，不對外發送任何
-    請求，秒級完成；整批快照覆蓋，idempotent；依賴 `build_institutional_summary.py`
-    已跑過。
+    三大法人買賣超合計，**涵蓋全市場**（不再限定 `stock_groups` 91 檔橫跨的板塊），
+    不對外發送任何請求，秒級完成；整批快照覆蓋，idempotent；依賴
+    `build_institutional_summary.py` 已跑過。
   - 五個 build 腳本彼此獨立、互不覆寫對方的表，可任意順序重跑（但不可同時併發跑，見上），
     `build_revenue_history.py`／`build_fundamentals.py`／`build_institutional_summary.py`／
-    `build_sector_flow.py` 都依賴 `stock_groups` 已有資料，須先跑過 `build_db.py`；
+    `build_sector_flow.py` 都依賴 `stocks` 已有資料，須先跑過 `build_db.py`；
     `build_sector_flow.py` 另外依賴 `institutional_flow_daily` 已有資料。
 
 ## 架構
@@ -71,17 +78,18 @@ collectors/institutional_official.py -> TWSE T86 + TPEx 3itrade_hedge_result.php
 collectors/_http.py                -> 共用節流 + 重試 + 統一錯誤（比照 tw-momentum-scanner 設計）
 models.py                          -> CollectorError（唯一錯誤型別）
 build_db.py                        -> orchestrate：stocks + stock_groups -> 整批寫入 SQLite -> 印摘要
-build_revenue_history.py           -> 【第五輪】orchestrate：monthly_revenue 近 3 年歷史
-                                  （只處理 stock_groups 名單股票）-> 逐月逐市場可續傳寫入 -> 印摘要
-build_fundamentals.py              -> orchestrate：shareholding_concentration
-                                  （只處理 stock_groups 名單股票）-> 整批寫入 -> 印摘要
-build_institutional_summary.py     -> 【第五輪】orchestrate：對 institutional_official.py
+build_revenue_history.py           -> 【第七輪起全市場】orchestrate：monthly_revenue 近 3 年歷史
+                                  （處理 stocks 全市場股票）-> 逐月逐市場可續傳寫入 -> 印摘要
+build_fundamentals.py              -> 【第七輪起全市場】orchestrate：shareholding_concentration
+                                  （處理 stocks 全市場股票）-> 整批寫入 -> 印摘要
+build_institutional_summary.py     -> 【第七輪起全市場】orchestrate：對 institutional_official.py
                                   增量 + 回補式查詢 TWSE/TPEx 近 3 年（約 750 個交易日）
                                   -> 從本地 institutional_flow_daily 彙總近 5/20/60 日
-                                  法人買賣超 + streak -> 印摘要
-build_sector_flow.py               -> 【第六輪】orchestrate：institutional_flow_daily
+                                  法人買賣超 + streak -> 印摘要（處理 stocks 全市場股票）
+build_sector_flow.py               -> 【第七輪起全市場】orchestrate：institutional_flow_daily
                                   JOIN stocks.industry_name -> 每板塊每日買賣超合計
-                                  -> sector_flow_daily（純本地聚合，不對外發送請求）
+                                  -> sector_flow_daily（純本地聚合，不對外發送請求，
+                                  涵蓋全市場板塊）
 ```
 
 ## Interface Contract（違反視為 bug）
@@ -99,9 +107,14 @@ build_sector_flow.py               -> 【第六輪】orchestrate：institutional
    `(stock_id, ym)`——近 3 年月營收時序表，不再是單列快照；`institutional_flow_daily`
    PK 仍是 `(stock_id, date)`，但視窗從「近 60 交易日」擴大為「近 3 年（約 750 交易日）
    累積式時序表」。`institutional_flow_summary` 的 5/20/60 日彙總計算邏輯不變，只是
-   資料來源改讀本地 `institutional_flow_daily`。**【第六輪】** `sector_flow_daily` PK
-   為 `(industry_name, date)`，範圍限定 `stock_groups` 名單橫跨的板塊（非全市場），
-   理由見 HANDOFF.md 關鍵決策。
+   資料來源改讀本地 `institutional_flow_daily`。**【第七輪】** `sector_flow_daily` PK
+   為 `(industry_name, date)`，**範圍改為全市場**（`stocks` 表全部，不再限定
+   `stock_groups` 91 檔橫跨的板塊），理由見 HANDOFF.md 第七輪紀錄。
+   **【第七輪】`monthly_revenue`／`shareholding_concentration`／`institutional_
+   flow_daily`／`institutional_flow_summary`／`sector_flow_daily` 這五張表的篩選範圍
+   從 `stock_groups`（91 檔概念股）擴大為 `stocks` 全市場（目前 1971 檔），schema 本身
+   （欄位、PK）不變，純粹是篩選範圍變寬，資料量大幅增加。`stock_groups` 表本身未受
+   影響，仍是有效的概念股標記，可用於未來「篩選出概念股子集」的查詢用途。**
 
 ## 資料源
 
