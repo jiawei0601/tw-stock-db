@@ -12,12 +12,16 @@
 直接跟市值加權的 TAIEX 指數比較，金額口徑才能對齊指數漲跌方向）。**【第十輪起】** 三大
 法人資金流向新增「族群（概念股）層級」彙總（`group_flow_*`），是板塊層級（`sector_
 flow_*`）的族群版，股數/金額兩口徑、日/週兩粒度皆有，共四張表。個人投資用途，為未來
-「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。**視覺化網頁本身不在任何一輪任務範圍
-內**，見 HANDOFF.md 下一步。`stock_groups`（91 檔概念股標記）**【第十輪起】** 除了原有
-「篩選出概念股子集」的查詢用途，也是 `group_flow_*` 四張表的聚合依據，但**族群成分重疊
-（一檔股票可屬多個族群），`group_flow_*` 的數字不可跨族群相加**，跟 `sector_flow_*`
-（每檔股票唯一歸屬一個官方產業別）的加總語意不同，見下方 build/run 段落與 Interface
-Contract。
+「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。`stock_groups`（91 檔概念股標記）
+**【第十輪起】** 除了原有「篩選出概念股子集」的查詢用途，也是 `group_flow_*` 四張表的
+聚合依據，但**族群成分重疊（一檔股票可屬多個族群），`group_flow_*` 的數字不可跨族群
+相加**，跟 `sector_flow_*`（每檔股票唯一歸屬一個官方產業別）的加總語意不同，見下方
+build/run 段落與 Interface Contract。**【第十一輪，本專案主產出物】** `export_dashboard.py`
+匯出 `dashboard.html`（repo 根目錄）—— 完全獨立、免伺服器、瀏覽器雙擊即開的靜態台股
+資金流向儀表板，整合前十輪累積的板塊/族群金額流、TAIEX、個股彙總（月營收年增率/籌碼
+集中度）資料。**定位是資金結構的觀察工具，不是訊號產生器**——`analysis/` 下五份「法人
+資金流向預測力系列」報告已確立「描述性有效、預測性全部失敗」的結論，頁面底部「使用
+須知」區塊誠實陳述並列出五份報告檔名，見下方 build/run 段落。
 
 ## 專案慣例
 
@@ -120,7 +124,27 @@ Contract。
     計算橫跨多族群的股票，跟全市場/全概念股合計對不上）——這跟 `sector_flow_*`（每檔
     股票在 `stocks.industry_name` 裡只有唯一一個官方產業別，跨板塊加總才有意義）的
     加總語意完全不同，使用時務必只在「單一族群自己內部」的語意下解讀數字。
-  - 十二個 build/export 腳本彼此獨立、互不覆寫對方的表，可任意順序重跑（但不可同時
+  - `python export_dashboard.py [--db-path PATH] [--out PATH]`（**【第十一輪，本專案
+    主產出物】** 唯讀彙整 `sector_flow_value_weekly`/`_daily`、`group_flow_value_
+    weekly`/`_daily`、`taiex_daily`、`institutional_flow_daily` JOIN `daily_prices`
+    （現算個股近 20 交易日/近 4 週法人淨額金額，不依賴既有彙總表）、`monthly_
+    revenue`、`shareholding_concentration`、`stocks`、`stock_groups`，匯出單一獨立
+    HTML `dashboard.html`（repo 根目錄，資料內嵌 JSON、Chart.js 走 CDN，瀏覽器雙擊
+    即開不需伺服器，比照 `export_sector_flow_animation.py` 的模式）。內容五大區塊：
+    總覽（TAIEX 週線 + 全市場三大法人週度金額，可切換外資/投信/自營商/合計）、板塊
+    熱力圖（34 板塊 x 150 週，HTML table 實作，藍=淨流入/橘紅=淨流出/白=近零）、板塊
+    排行與下鑽（近 4/12 週前十後十 + 選板塊看週度走勢與成分股 top10）、族群視圖
+    （19 族群縮小版，同樣的熱力圖/排行/下鑽，頁首強調族群數字不可跨族群加總）、投信
+    特寫（全市場投信週度金額 + 目前連買/連賣天數 + 距下個季底倒數 + 季底作帳統計
+    + 投信目前連買中的板塊前 5 名）。底部「使用須知」誠實陳述「這是資金結構的觀察
+    工具、不是訊號產生器」，列出 `analysis/` 下五份「法人資金流向預測力系列」報告
+    檔名（`taiex-flow-correlation-2026-07-16.md`／`flow-persistence-seasonality-
+    2026-07-16.md`／`trust-streak-price-impact-2026-07-17.md`／`trust-streak-
+    taiex-2026-07-17.md`／`sector-flow-entry-signal-2026-07-17.md`）。純本地聚合，
+    不對外發送任何請求，數秒內完成；輸出檔案實測約 105KB（500KB 預算內）；依賴
+    `build_sector_flow_value.py`／`build_group_flow.py`／`build_taiex.py`／
+    `build_revenue_history.py`／`build_fundamentals.py` 都已跑過。
+  - 十三個 build/export 腳本彼此獨立、互不覆寫對方的表，可任意順序重跑（但不可同時
     併發跑，見上），`build_revenue_history.py`／`build_fundamentals.py`／
     `build_institutional_summary.py`／`build_sector_flow.py`／`build_taiex.py` 都依賴
     `stocks`/`sector_flow_daily` 已有資料，須先跑過 `build_db.py`；`build_sector_flow.py`
@@ -191,6 +215,14 @@ build_group_flow.py                -> 【第十輪】orchestrate：institutional
                                   daily/weekly（金額口徑）；週切分沿用與 sector_flow_
                                   weekly 相同的交易日序列（純本地聚合，不對外發送請求，
                                   數字不可跨族群相加，見下方 Interface Contract）
+export_dashboard.py                -> 【第十一輪，本專案主產出物】orchestrate：唯讀
+                                  彙整 sector_flow_value_*/group_flow_value_*/
+                                  taiex_daily/institutional_flow_daily JOIN
+                                  daily_prices（現算個股近 4 週法人淨額）/monthly_
+                                  revenue/shareholding_concentration/stocks/
+                                  stock_groups -> 匯出獨立靜態 HTML 儀表板
+                                  dashboard.html（總覽+板塊熱力圖+排行下鑽+族群
+                                  視圖+投信特寫+使用須知，不寫入資料庫）
 ```
 
 ## Interface Contract（違反視為 bug）

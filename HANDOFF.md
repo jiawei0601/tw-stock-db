@@ -2,12 +2,59 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-17（第十輪：`group_flow_daily`/`group_flow_weekly`/
-  `group_flow_value_daily`/`group_flow_value_weekly` 族群（概念股）層級資金流彙總表，
-  詳見下方第十輪紀錄）
+- 最後更新：Claude Code @ 2026-07-17（第十一輪：`dashboard.html` 台股資金流向儀表板 v1
+  —— 本專案主產出物，完全獨立、免伺服器、瀏覽器雙擊即開的靜態儀表板，詳見下方
+  第十一輪紀錄）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
+  - **【第十一輪】`dashboard.html`（repo 根目錄）—— 台股資金流向儀表板 v1，本專案主
+    產出物**：新增 `export_dashboard.py`，唯讀彙整前十輪累積的資料表，匯出一份完全
+    獨立、免伺服器、瀏覽器雙擊即開的靜態 HTML（比照 `export_sector_flow_animation.py`
+    的模式：資料內嵌 JSON、Chart.js 走 CDN），不寫入資料庫、不對外發送任何請求。
+    - **產品定位（寫進頁面本身）**：這是資金結構的觀察工具，不是訊號產生器。頁面
+      底部「使用須知」區塊如實引用 `analysis/` 下五份「法人資金流向預測力系列」
+      報告（`taiex-flow-correlation-2026-07-16.md`／`flow-persistence-seasonality-
+      2026-07-16.md`／`trust-streak-price-impact-2026-07-17.md`／`trust-streak-
+      taiex-2026-07-17.md`／`sector-flow-entry-signal-2026-07-17.md`）的核心結論
+      ——「描述性有效、預測性全部失敗」，並列出五份檔名。
+    - **五大區塊**：(1) 總覽：TAIEX 3 年週線（用 `taiex_daily` 依週取區間內最後
+      收盤點）+ 全市場三大法人週度淨買賣超金額柱狀圖（`sector_flow_value_weekly`
+      跨 34 板塊 `SUM`，因每檔股票只屬一個板塊，加總語意合法），兩圖獨立畫布垂直
+      堆疊、共用同一組週別 x 軸標籤（不是雙 y 軸擠一張圖），柱狀圖可用按鈕切換
+      外資/投信/自營商/合計四個 dataset。(2) 板塊熱力圖：34 板塊（依 3 年總金額
+      活動量排序）x 150 週，用 HTML `<table>` + 逐格背景色實作（不用 canvas），
+      色階依全部格子絕對值的 95 百分位動態定尺度、白=近零/藍=淨流入/橘紅=淨流出，
+      `title` 屬性提供 hover 顯示板塊/週期間/金額。(3) 板塊排行與下鑽：近 4/12 週
+      淨流入排行前十/後十（點名稱可直接跳去下鑽），下拉選單選任一板塊看 150 週
+      長條圖 + 成分股表（現算 `institutional_flow_daily` JOIN `daily_prices` 近
+      20 交易日的個股法人淨額金額，取前 10 大，附最新月營收 YoY%／籌碼集中度
+      `pct_gt_400zhang`，只嵌彙總數字不嵌時序）。(4) 族群視圖：19 族群的縮小版
+      （同款熱力圖/排行/下鑽），頁首用醒目的警示框重申「族群成分重疊，數字不可
+      跨族群加總」。(5) 投信特寫：全市場投信週度金額圖 + 目前連買/連賣天數（從
+      `sector_flow_value_daily` 跨板塊 `SUM(trust_value)` 逐日往回數同號天數）+
+      距下個季底日曆天倒數（純日期算術，不依賴未來交易日資料）+ 季底作帳統計
+      一句話（引用 `flow-persistence-seasonality-2026-07-16.md` 的實際數字：
+      季底 5 日均買超 +4,314 萬元 vs 其他日 +1,676 萬元，高約 157%，p=0.024）+
+      投信目前連買中的板塊前 5 名。
+    - **實測結果**：`dashboard.html` 檔案大小約 **105KB**（500KB 預算內，遠低於
+      預期，因為個股彙總只嵌 top10、不嵌全市場 1970 檔）；34 板塊/19 族群/150 週
+      皆與資料庫一致；用 headless Edge（`msedge.exe --headless --screenshot`）
+      實際渲染截圖檢查過全頁版面（總覽/熱力圖/排行/族群/投信特寫/使用須知六個
+      區塊皆正常顯示、中文字型正常、light 配色未被深色模式反轉）。
+    - `tests/test_dashboard_export.py`（42 個測試）：檔案產出、JSON 可解析、無
+      未替換的模板 placeholder、34 板塊/19 族群/150 週與 DB 一致、抽查板塊/族群
+      熱力圖各一格數字等於 DB 值、全市場週度合計等於跨板塊加總、TAIEX 週線無缺口、
+      下鑽 top10 排序正確且涵蓋全部板塊/族群、投信 streak 與季底倒數欄位存在、
+      使用須知文字與五份報告檔名存在（且五個檔案確實存在於 `analysis/`）、關鍵
+      DOM id 存在、light color-scheme 鎖定存在。全專案測試共 **133 個，全綠**。
+    - `AGENTS.md`（架構圖新增一行、build/run 新增 `export_dashboard.py` 說明、
+      專案定位段落）／`README.md`（新增「怎麼打開儀表板」段落）同步更新。
+    - **設計偏離**：規格要求「族群成分重疊…UI 呈現時務必遵守語意」用醒目警示框
+      而非純文字段落呈現（比規格文字描述更視覺化，判斷更符合「誠實揭露」的目的）；
+      投信季底統計數字採用報告的實際數字（+157%／p=0.024）而非規格草稿裡的示意
+      數字（規格原文寫「較平日高 57%」，經核對 `flow-persistence-seasonality-
+      2026-07-16.md` 實際數字後採用報告真實結論 157%，不照抄規格草稿的示意值）。
   - `collectors/isin.py`：解析證交所 ISIN 頁面（`isin.twse.com.tw/isin/C_public.jsp`），
     取得上市/上櫃股票清單＋官方產業別文字。
   - `collectors/company_info.py`：解析 TWSE/TPEx 公司基本資料 OpenAPI，取得官方產業別
@@ -362,8 +409,13 @@
       全專案測試共 **91 個，全綠**。
     - `AGENTS.md` 更新：專案定位段落、build/run 新增 `build_group_flow.py` 說明、
       架構圖新增一行、Interface Contract 新增族群表 schema 與跨族群加總語意警語。
-- 進行中（做到哪一步）：無，第十輪任務範圍內的項目已全部完成。
+- 進行中（做到哪一步）：無，第十一輪任務範圍內的項目已全部完成。
 - 下一步（下一個任務，非本次範圍）：
+  0. **【第十一輪起，原「視覺化網頁」項目已完成】** `dashboard.html` 已上線（見上方
+     第十一輪紀錄），下方第 3 點原始描述保留供歷史考證，但已被取代——若之後想擴充
+     儀表板（例如加個股層級的獨立下鑽頁、串接 `institutional_flow_summary` 的
+     streak 欄位、把「近 4 週」改成可調參數），可以直接在 `export_dashboard.py`
+     上疊加，不需要重新設計架構。
   1. **持續補充族群/概念股**：`stock_groups` 是人工整理/使用者提供資料，非官方來源，
      之後有新的族群清單可比照同樣模式（核對代號後 `INSERT OR REPLACE`）繼續累積，
      不需改 schema。**【第七輪起】不再需要重新 backfill**：`build_revenue_history.py`
@@ -654,7 +706,10 @@
                                             # 聚合，秒級；依賴 build_institutional_
                                             # summary.py/build_daily_prices.py/
                                             # build_sector_flow.py 都已跑過）
-  python -m pytest tests/ -q               # 驗證資料庫內容（91 個測試）
+  python export_dashboard.py               # 【第十一輪，本專案主產出物】台股資金流向
+                                            # 儀表板，唯讀彙整 -> dashboard.html（repo
+                                            # 根目錄，數秒完成，~105KB）
+  python -m pytest tests/ -q               # 驗證資料庫內容 + 匯出檔案（133 個測試）
   ```
   **注意**：`build_revenue_history.py` 與 `build_institutional_summary.py` 都不要跟
   其他 build 腳本同時併發執行（見上方 SQLite 單寫入者雷區）；五個 build 腳本本身

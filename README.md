@@ -27,6 +27,21 @@ python -m pytest tests/ -q    # 驗證資料庫內容合理
 見 [docs/data-sources.md](docs/data-sources.md)，記錄了實測過的 endpoint 行為、編碼陷阱、
 過濾邏輯（為何排除 ETF/權證/TDR/REITs，為何保留創新板）。
 
+## 怎麼打開儀表板
+
+**【第十一輪】本專案主產出物**：`dashboard.html`（repo 根目錄）—— 完全獨立、免伺服器的
+台股資金流向儀表板，直接用瀏覽器雙擊打開即可（不需要 `python -m http.server` 或任何
+安裝步驟），資料已全部內嵌成 JSON，不會對外發送任何請求。內容涵蓋：TAIEX 週線 + 全市場
+三大法人週度金額、34 板塊熱力圖、板塊排行與下鑽（成分股表）、19 族群縮小版視圖、投信
+特寫（連買/連賣天數、季底作帳統計）。底部「使用須知」誠實陳述：**這是資金結構的觀察
+工具，不是訊號產生器**，並列出五份法人流向預測力分析報告的檔名（`analysis/` 下）。
+
+若資料庫更新後想重新產生：
+
+```bash
+python export_dashboard.py    # 讀 data/tw_stocks.db -> 覆寫 dashboard.html
+```
+
 ## 專案定位與慣例
 
 見 [AGENTS.md](AGENTS.md)。現況與下一步見 [HANDOFF.md](HANDOFF.md)。
