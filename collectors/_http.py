@@ -65,13 +65,16 @@ def get(
         _throttle(bucket, min_interval)
         try:
             resp = _session.get(url, params=params, headers=req_headers, timeout=timeout)
-        except requests.Timeout as e:
+        except (requests.Timeout, requests.ConnectionError) as e:
+            # ConnectionError 涵蓋 DNS 解析失敗/連線被拒/連線中斷等暫時性網路問題
+            # （長迴圈逐日打 API 時實測會偶發 getaddrinfo failed，視同 timeout 可退避重試）。
             last_exc = e
             last_status = None
             if attempt < len(RETRY_BACKOFF_SEC):
                 time.sleep(RETRY_BACKOFF_SEC[attempt])
                 continue
-            raise CollectorError(source, f"timeout: {e}", http_status=None, retriable=True) from e
+            kind = "timeout" if isinstance(e, requests.Timeout) else "connection error"
+            raise CollectorError(source, f"{kind}: {e}", http_status=None, retriable=True) from e
         except requests.RequestException as e:
             raise CollectorError(source, f"request failed: {e}", http_status=None, retriable=False) from e
 

@@ -2,7 +2,8 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-16（第三輪：91 檔概念股的月營收/籌碼集中度/三大法人動態）
+- 最後更新：Claude Code @ 2026-07-16（第四輪：三大法人動態改用官方 API 直抓，取代
+  `tw_cache/institutional.db` 依賴，91 檔全數涵蓋）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
@@ -49,7 +50,35 @@
     - 三個測試維度合計新增 `tests/test_fundamentals_content.py`（14 個測試），全綠；
       全專案測試 `python -m pytest tests/ -q` 共 24 個測試全綠。
     - `docs/data-sources.md` 新增第 6-9 節記錄新 endpoint 實測結果（欄位、陷阱、限制）。
-- 進行中（做到哪一步）：無，第三輪任務範圍內的項目已全部完成。
+  - **【第四輪】三大法人動態改用官方 API 直抓，取代 `tw_cache/institutional.db` 依賴**：
+    新增 `collectors/institutional_official.py`（TWSE `fund/T86` + TPEx
+    `3itrade_hedge_result.php`，皆為「依日期查詢、當日全市場」endpoint），改寫
+    `build_institutional_summary.py` 為逐日往回查詢、TWSE/TPEx 各自湊滿 60 個交易日
+    （不再讀取 `tw_cache/institutional.db`，該共用資料源只涵蓋 tw-momentum-scanner
+    篩選過的 696 檔動能股清單，導致第三輪版本 91 檔中只有 71 檔有資料，且新鮮度停留
+    在該資料源上次更新的舊日期）。
+    - **實測結果：91/91 全數涵蓋**（含第三輪缺漏的全部 20 檔），`latest_date` 集中在
+      2026-07-15（88 檔）/ 2026-07-14（3 檔，個別股票當日停牌所致，非 bug），落差
+      在 1 個交易日內，資料新鮮度一致，達成本輪任務目的。
+    - 兩個 endpoint 的欄位對應皆用「同日交叉核對已知來源數字」的方式實測確認（TWSE
+      用 2330 台積電驗算三大法人合計欄位是否等於三個子欄位加總；TPEx 用 3105 穩懋
+      核對 `tpex_3insti_daily_trading` OpenAPI 的英文鍵名數字），不是用猜的，過程與
+      精確欄位索引記錄在 `docs/data-sources.md` 第 9-10 節。
+    - `tests/test_fundamentals_content.py` 更新三大法人動態相關測試：
+      `test_institutional_flow_summary_covers_most_target_stocks`（取代舊版「只要求
+      >0」的寬鬆測試，改要求 >=90% 覆蓋率）、新增
+      `test_institutional_flow_summary_freshness_consistent`（MIN/MAX latest_date
+      落差 <=5 天，直接驗證本輪任務的核心目的）、`test_institutional_flow_known_stock_2330`
+      加強為量級合理性檢查（單日均量 <2 億股，防欄位錯位這類 bug）。全專案測試共
+      25 個，全綠。
+    - **順帶修正 `collectors/_http.py` 的一個既有缺口**：原本只有 `requests.Timeout`
+      會走退避重試，`requests.ConnectionError`（涵蓋 DNS 解析失敗等暫時性網路問題）
+      會直接被歸類成不可重試而整個中止。本輪任務因為要在單次執行內對 TWSE/TPEx
+      各發送 60~90 次請求，實測真的觸發過一次 DNS 解析失敗（`getaddrinfo failed`）
+      導致長迴圈中途整個腳本失敗，修正後 `ConnectionError` 與 `Timeout` 一樣視為
+      retriable、走相同的 5/20/60 秒退避重試。這是本輪任務發現的真實 bug，不是
+      臆測性修改。
+- 進行中（做到哪一步）：無，第四輪任務範圍內的項目已全部完成。
 - 下一步（下一個任務，非本次範圍）：
   1. **持續補充族群/概念股**：`stock_groups` 是人工整理/使用者提供資料，非官方來源，
      之後有新的族群清單可比照同樣模式（核對代號後 `INSERT OR REPLACE`）繼續累積，
@@ -57,17 +86,15 @@
      查詢 `stock_groups`，族群名單擴充後直接重跑即可自動涵蓋新股票，不需改程式。
   2. **視覺化網頁**：讀 `data/tw_stocks.db` 的 `stocks` + `stock_groups` +
      `monthly_revenue` + `shareholding_concentration` + `institutional_flow_summary`/
-     `institutional_flow_daily` 做「資金流向依板塊/族群」儀表板。三輪任務都完全沒有
+     `institutional_flow_daily` 做「資金流向依板塊/族群」儀表板。四輪任務都完全沒有
      動這塊。
-  3. **補齊 institutional.db 缺漏的 20 檔法人資料**（若使用者需要）：這 20 檔從未進過
-     tw-momentum-scanner 的動能股篩選清單，若要補齊，需另外對 TWSE/TPEx 官方三大法人
-     買賣超 API（例如 TWSE `fund/T86`）抓歷史，寫一個新 collector，不能靠共用資料庫。
-  4. （可選）**定期刷新排程**：目前三個資料庫產出都是單次快照，若要保持最新，需要排程
+  3. （可選）**定期刷新排程**：目前三個資料庫產出都是單次快照，若要保持最新，需要排程
      重跑 `python build_db.py` + `python build_fundamentals.py` +
      `python build_institutional_summary.py`（比照 tw-momentum-scanner 用 Windows
-     排程或 cron，且 `build_institutional_summary.py` 的新鮮度上限取決於
-     `tw_cache/institutional.db` 本身多久更新一次，不受本專案排程頻率控制）。本次未設定。
-     注意：三個 build 腳本互不覆寫彼此的表，可任意順序/頻率重跑。
+     排程或 cron）。本次未設定。注意：三個 build 腳本互不覆寫彼此的表，可任意順序/
+     頻率重跑；但 `build_institutional_summary.py` 第四輪起改成官方 API 直抓，單次
+     執行約需 4-6 分鐘（每次重跑都是完整的 60 交易日 x 2 市場逐日查詢，沒有增量抓取，
+     若排程頻率提高到每日一次，屬合理用量，不建議抓更頻繁避免對官方站台造成不必要負擔）。
 - 關鍵決策 + 為什麼：
   - **主要產業別來源用 ISIN HTML 頁面而非 TWSE OpenAPI JSON**：OpenAPI
     (`t187ap03_L`/`mopsfin_t187ap03_O`) 的產業別欄位只有兩碼數字代碼（如 "24"），
@@ -102,10 +129,35 @@
     的覆蓋式快照」，不是無限累積的時序表，跟前述兩種快照的差別在於它保留了一小段
     歷史窗口而非單一時間點。
   - **`institutional_flow_summary` 是「有資料才寫一列」，不是「91 列、缺資料留 NULL」**：
-    91 檔中查無資料的 20 檔，`institutional_flow_summary` 裡完全沒有那一列（不是一整列
+    查無資料的股票，`institutional_flow_summary` 裡完全沒有那一列（不是一整列
     NULL）。這個設計選擇是因為「查無資料」跟「有資料但欄位是 0」是不同語意——如果留一整列
     NULL，容易被誤讀成「近期買賣超為 0」；不寫入該列，查詢端用 LEFT JOIN 就能自然分辨
-    「這檔沒有法人動態資料可看」，比留 NULL 列更誠實。
+    「這檔沒有法人動態資料可看」，比留 NULL 列更誠實。**【第四輪】改用官方 API 後這個
+    設計理由變成理論性保障**（實測 91/91 全數涵蓋，目前沒有任何一檔真的觸發這個分支），
+    但保留這個行為是因為官方 API 未來仍可能對個別股票（例如剛終止上市、興櫃轉上市初期）
+    查無資料，不能假設永遠 91/91。
+  - **【第四輪】改用官方 API 後，法人動態抓取視窗從「90 日 lookback 緩衝 + 60 日儲存」
+    簡化為「直接抓 60 個交易日」**：第三輪讀 `institutional.db`（本地 SQLite 查詢
+    幾乎零成本）時，用 90 日緩衝抓取範圍是為了讓 streak 計算不會恰好卡在 60 日視窗邊界
+    低估連續天數。第四輪改成逐日打官方 API（每個交易日一次網路請求，有節流成本），
+    抓 90 日會比使用者要求的「~60 個交易日」多出 50% 請求量，故簡化為直接抓 60 日，
+    streak 若剛好在第 60 天仍是買超/賣超方向，`foreign_streak_truncated=1` 如實標記
+    「這是下界值、真實連續天數可能更長」，不用多抓 30 天去換一個更精確但使用者沒要求
+    的數字。
+  - **【第四輪】`foreign_net` 定義兩個市場算法不同，但語意一致**：TWSE T86 沒有現成的
+    「外資合計」欄位，需要 collector 自己把「外陸資買賣超(不含外資自營商)」+「外資
+    自營商買賣超」相加；TPEx hedge_result.php 則已經內建「外資合計」欄位（index 10），
+    不需要、也不可以再手動加總子欄位（會重複計算，經實測驗證 index10 本身就等於
+    index4+index7 的加總結果）。兩個市場最終寫入 `foreign_net` 的語意相同（業界慣例
+    「外資買賣超」= 外資陸資本體 + 外資自營商），只是計算路徑不同，見
+    `docs/data-sources.md` 第 9-10 節。
+  - **【第四輪】修正 `collectors/_http.py`：`requests.ConnectionError` 併入 retriable
+    重試邏輯**：原本只有 `requests.Timeout` 會退避重試，`ConnectionError`（含 DNS
+    解析失敗）直接判定不可重試、整個中止。本輪任務單次執行要對 TWSE/TPEx 各發送
+    60~90 次請求，長迴圈中途真的實測觸發過一次 DNS 解析失敗導致腳本中止，因此把
+    `ConnectionError` 併入跟 `Timeout` 同樣的重試分支。這個改動影響全部 collector
+    （`_http.py` 是共用模組），但屬於修正既有缺口、不是新增行為，對其餘 collector
+    只有變得更健壯、沒有破壞性影響。
   - **籌碼集中度指標選擇「留 15 級距原始明細 + 算 2 個代理指標」，不是只留代理指標**：
     只留 `pct_gt_400zhang`／`pct_gt_1000zhang` 兩個數字最省空間，但未來如果想換一個
     門檻（例如改看 >600張）就要重新抓資料；`levels_json` 把 15 級距完整明細都留著，
@@ -127,25 +179,35 @@
   - **【第三輪】TDCC CSV 的證券代號欄位是固定 6 碼、右側補半形空格**（`"2330  "`），
     比對前一定要 `.strip()`，忘記會導致 91 檔全部查詢回 0 筆（本專案實測時真的踩過，
     見 `docs/data-sources.md` 第 8 節）。
-  - **【第三輪】institutional.db 的 stock_id 帶 yfinance 風格市場後綴**
-    （TWSE 股票 `.TW`、TPEx 股票 `.TWO`，例如 `2330.TW`），不是純 4 碼代號，用純代號查詢
-    一樣會 100% 落空（本專案實測時也踩過，見 `docs/data-sources.md` 第 9 節）。
-  - **【第三輪】institutional.db 的「最新日期」不等於「今天」**：實測 2026-07-16 執行
-    `build_institutional_summary.py` 時，`institutional.db` 的 `MAX(date)` 是
-    `2026-05-28`（約 1.5 個月前），所以「近 5/20/60 日」是以 2026-05-28 往回算，不是
-    以執行當下的日曆日往回算。每次重跑都要用 `SELECT MAX(date)` 查詢實際值，程式已經
-    這樣做，但**看到 `institutional_flow_summary.latest_date` 是舊日期不要當成 bug**，
-    先去查 `tw_cache/institutional.db` 本身上次更新是什麼時候。
-  - **【第三輪】`institutional.db` 只准讀取**：`build_institutional_summary.py` 用
-    `sqlite3.connect(f"file:{path}?mode=ro", uri=True)` 開唯讀連線，任何修改這個腳本
-    的人都不可以把它改成可寫連線，也不可以把這個檔案複製進本 repo 的 `data/` 目錄
-    （它是跨專案共用資產，屬於 `tw-momentum-scanner`）。
+  - **【第三輪，已隨第四輪改版失效，僅供歷史考證】** 以下三點是第三輪讀
+    `tw_cache/institutional.db` 時期的雷區，**`build_institutional_summary.py` 自
+    第四輪起已完全不讀這個檔案**，這三點目前對本專案不再適用（但檔案本身仍是
+    `tw-momentum-scanner` 的共用資產，該專案自己讀寫時依然適用）：institutional.db
+    的 stock_id 帶 yfinance 風格市場後綴（`.TW`/`.TWO`）；「最新日期」不等於「今天」
+    （取決於該共用庫上次更新時間，第三輪實測時停留在 2026-05-28）；只准用 `mode=ro`
+    唯讀連線開啟，不可寫入或搬動。細節見 `docs/data-sources.md` 第 11 節。
+  - **【第四輪】TWSE `fund/T86` 的 JSON 回應不能靠 `resp.json()` 或 requests 自動編碼
+    偵測**：`Content-Type` 宣告 `charset=UTF-8`，但實測用 `resp.json()` 或依賴
+    `r.encoding` 自動偵測都會得到亂碼中文欄位名（即使 `r.encoding` 顯示 `'UTF-8'` 也
+    一樣）。必須改用 `resp.content.decode('utf-8')` 手動解碼後再 `json.loads()`，
+    `collectors/institutional_official.py::fetch_twse_t86` 已這樣處理，之後若照抄
+    `_http.get()` 回傳的 `resp.json()` 慣例會踩到這個坑。
+  - **【第四輪】TPEx `3itrade_hedge_result.php` 的頂層 `stat` 欄位無法用來判斷是否為
+    交易日**：實測非交易日（週日）查詢，`stat` 仍固定回 `'ok'`，只有 `tables[0]['data']`
+    是空 list 才代表「當天無交易」。這跟同一輪任務用到的 TWSE T86（`stat != 'OK'`
+    才代表無交易）行為不同，兩個 endpoint 的「非交易日」判斷邏輯**不能共用同一套邏輯**，
+    `collectors/institutional_official.py` 的兩個 fetch 函式分別用各自正確的判斷方式。
+  - **【第四輪】`build_institutional_summary.py` 單次執行約需 4-6 分鐘**（TWSE/TPEx
+    各約 60~90 次節流過的請求，`MIN_INTERVAL_SEC=1.7` 秒/請求），比第三輪讀本地
+    SQLite（幾乎瞬間完成）慢很多，這是官方 API 直抓的必然代價，不要誤以為卡住了；
+    執行時會即時印出「TWSE/TPEx 已抓 N/60 個交易日」進度，可用來確認沒有卡死。
 - 怎麼跑 / 怎麼測：
   ```bash
   cd C:\CLAUDE\investing\tw-stock-db
   pip install -r requirements.txt
   python build_db.py                       # 整批刷新 stocks + stock_groups
   python build_fundamentals.py             # 91 檔月營收 + 籌碼集中度快照
-  python build_institutional_summary.py    # 91 檔三大法人近期動態快照（讀 tw_cache/institutional.db）
-  python -m pytest tests/ -q               # 驗證資料庫內容（24 個測試）
+  python build_institutional_summary.py    # 91 檔三大法人近期動態快照（TWSE T86 + TPEx
+                                            # hedge_result.php 官方 API 逐日直抓，約 4-6 分鐘）
+  python -m pytest tests/ -q               # 驗證資料庫內容（25 個測試）
   ```

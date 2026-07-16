@@ -25,10 +25,12 @@
   - `python build_fundamentals.py [--db-path PATH]`（`monthly_revenue` +
     `shareholding_concentration` 表，只針對 `stock_groups` 名單股票，動態查詢不寫死
     清單，整批快照覆蓋，idempotent）。
-  - `python build_institutional_summary.py [--db-path PATH] [--institutional-db PATH]`
-    （`institutional_flow_summary` + `institutional_flow_daily` 表，讀取
-    `C:\CLAUDE\tw_cache\institutional.db` 唯讀共用資料源彙總，只針對 `stock_groups`
-    名單股票，整批快照覆蓋，idempotent）。
+  - `python build_institutional_summary.py [--db-path PATH] [--start-date YYYY-MM-DD]`
+    （`institutional_flow_summary` + `institutional_flow_daily` 表，改用 TWSE `fund/T86`
+    ＋ TPEx `3itrade_hedge_result.php` 官方按日期查詢 endpoint 逐日直抓近 60 個交易日，
+    只針對 `stock_groups` 名單股票，整批快照覆蓋，idempotent；**不讀取**
+    `C:\CLAUDE\tw_cache\institutional.db`，見下方第四輪決策。單次執行約需 4-6 分鐘
+    （TWSE/TPEx 各約 60~90 次節流過的請求）。
   - 三個 build 腳本彼此獨立、互不覆寫對方的表，可任意順序重跑，但 `build_fundamentals.py`
     與 `build_institutional_summary.py` 都依賴 `stock_groups` 已有資料，須先跑過
     `build_db.py`。
@@ -36,17 +38,20 @@
 ## 架構
 
 ```
-collectors/isin.py            -> 證交所 ISIN 頁面，股票清單 + 官方產業別文字（主要來源）
-collectors/company_info.py    -> TWSE/TPEx 公司基本資料 API，補齊官方產業別數字代碼
-collectors/revenue.py         -> TWSE/TPEx 月營收 opendata（最新一期全量，含年增率）
-collectors/shareholding.py    -> TDCC 集保結算所股權分散表 opendata（全市場，週更快照）
-collectors/_http.py           -> 共用節流 + 重試 + 統一錯誤（比照 tw-momentum-scanner 設計）
-models.py                     -> CollectorError（唯一錯誤型別）
-build_db.py                   -> orchestrate：stocks + stock_groups -> 整批寫入 SQLite -> 印摘要
-build_fundamentals.py         -> orchestrate：monthly_revenue + shareholding_concentration
+collectors/isin.py                 -> 證交所 ISIN 頁面，股票清單 + 官方產業別文字（主要來源）
+collectors/company_info.py         -> TWSE/TPEx 公司基本資料 API，補齊官方產業別數字代碼
+collectors/revenue.py              -> TWSE/TPEx 月營收 opendata（最新一期全量，含年增率）
+collectors/shareholding.py         -> TDCC 集保結算所股權分散表 opendata（全市場，週更快照）
+collectors/institutional_official.py -> TWSE T86 + TPEx 3itrade_hedge_result.php，
+                                  依日期查詢三大法人買賣超（當日全市場，需逐日呼叫湊歷史）
+collectors/_http.py                -> 共用節流 + 重試 + 統一錯誤（比照 tw-momentum-scanner 設計）
+models.py                          -> CollectorError（唯一錯誤型別）
+build_db.py                        -> orchestrate：stocks + stock_groups -> 整批寫入 SQLite -> 印摘要
+build_fundamentals.py              -> orchestrate：monthly_revenue + shareholding_concentration
                                   （只處理 stock_groups 名單股票）-> 整批寫入 -> 印摘要
-build_institutional_summary.py -> orchestrate：讀取 tw_cache/institutional.db（唯讀）
-                                  彙總近 5/20/60 日法人買賣超 + streak -> 整批寫入 -> 印摘要
+build_institutional_summary.py     -> orchestrate：對 institutional_official.py 逐日往回查詢
+                                  TWSE/TPEx 直到各湊滿 60 個交易日 -> 彙總近 5/20/60 日
+                                  法人買賣超 + streak -> 整批寫入 -> 印摘要
 ```
 
 ## Interface Contract（違反視為 bug）
