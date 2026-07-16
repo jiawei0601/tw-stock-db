@@ -426,3 +426,21 @@ log`／`institutional_flow_summary`）後整個重新 backfill，不嘗試「補
 已從「全部股票 latest_date 落差 <=5 天」改為「至少 95% 的股票落在 MAX(latest_date)
 5 天內」，保留原本「偵測抓取邏輯是否退化成只更新一部分股票」的核心驗證目的，同時
 容忍全市場必然存在的少數停牌股。
+
+---
+
+# 第八輪：板塊資金流動週度動畫（2026-07-16）
+
+`build_sector_flow_weekly.py`／`export_sector_flow_animation.py` 都是**純本地聚合，
+不呼叫任何外部 API**，不新增資料來源，這裡只記錄實作上的取捨（完整理由見
+`HANDOFF.md` 第八輪關鍵決策）：
+
+- 「每 5 個交易日切一組」是直接對 `sector_flow_daily` 裡**已排序的交易日序列**取
+  index，`week_index = i // 5`（i 為交易日在排序後序列中的位置），不是對日曆日做
+  `date % 7` 之類的計算。這樣假日/停市天數不會被計入分母，每組固定是 5 個「真實
+  交易日」，只有最後一組（資料尾端不足 5 天）例外，`trading_days` 欄位如實記錄
+  每組實際天數，供下游判斷該不該把最後一組當成完整週看待。
+- `export_sector_flow_animation.py` 匯出的 HTML 是完全獨立檔案（Chart.js 走 CDN，
+  資料內嵌在 `<script>` 裡的 JSON 字面量），瀏覽器直接雙擊開啟即可用，不需要跑
+  本機伺服器，也不依賴這個 repo 的 Python 環境（適合直接分享這個 HTML 檔案給不會
+  跑 Python 的人）。
