@@ -1,18 +1,35 @@
-# tw-stock-db
+# tw-stock-db — 台股資金流向儀表板
 
-台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）標記。
-為「資金流向依板塊/族群視覺化」鋪路的資料底層 —— 本次任務範圍只到**資料庫建立＋官方產業別標記**，
-不含視覺化網頁、不含族群/概念股標記（那是留給未來任務的擴充點，見 [HANDOFF.md](HANDOFF.md)）。
+**線上版：<https://jiawei0601.github.io/tw-stock-db/>**（每個交易日傍晚更新）
+
+台股上市（TWSE）＋上櫃（TPEx）全市場 1,971 檔 × 近 3 年的三大法人資金流向資料庫與
+視覺化儀表板：官方產業別（34 板塊）＋概念股族群（19 族群）雙維度、股數＋金額雙口徑、
+TAIEX 對照、月營收年增率與籌碼集中度個股彙總。
+
+**定位聲明：這是資金結構的觀察工具，不是訊號產生器。** 本 repo 的 `analysis/` 下有五份
+「法人資金流向預測力」系列分析，結論一致：法人流向**描述當下有效（同日相關 ~0.54）、
+預測未來全部失敗**（隔日大盤、指標擇時、個股連買事件、大盤連買事件、板塊輪動回測皆無
+可交易 alpha）。本專案所有內容皆非投資建議。
+
+資料來源：TWSE / TPEx / TDCC / MOPS 官方公開 API 與頁面（詳見
+[docs/data-sources.md](docs/data-sources.md)），資料為官方公開資訊之彙整。
 
 ## 快速開始
 
 ```bash
 pip install -r requirements.txt
-python build_db.py            # 建置/刷新資料庫（idempotent，重跑安全）
-python -m pytest tests/ -q    # 驗證資料庫內容合理
+python build_db.py            # 建置股票基本資料（idempotent，重跑安全）
+python build_institutional_summary.py   # 三大法人 3 年回補（首次約 60-70 分鐘）
+python build_daily_prices.py            # 收盤價 3 年回補（首次約 60-90 分鐘）
+python build_taiex.py && python build_revenue_history.py && python build_fundamentals.py
+python build_sector_flow.py && python build_sector_flow_weekly.py && python build_sector_flow_value.py
+python build_group_flow.py
+python export_dashboard.py    # 產出 dashboard.html
+python -m pytest tests/ -q    # 驗證
 ```
 
-資料庫檔案：`data/tw_stocks.db`（SQLite，已納入版本控制，理由見 HANDOFF.md）。
+資料庫檔案：`data/tw_stocks.db`（SQLite，~240MB，**不納入版本控制**——超過 GitHub 單檔
+上限，用上列 build 腳本可完整重建；歷史細節見 HANDOFF.md）。
 
 ## 資料表
 
@@ -56,14 +73,8 @@ python refresh_daily.py            # 依序跑完 11 步，記錄到 data/refres
 python refresh_daily.py --dry-run  # 只列印步驟清單，不執行
 ```
 
-排程註冊不在本腳本範圍內，需另行授權設定（建議週一至五 18:30，範例指令，實際註冊由
-主對話另行處理）：
-
-```bash
-schtasks /create /tn "tw-stock-db-refresh" /tr "python C:\CLAUDE\investing\tw-stock-db\refresh_daily.py" /sc weekly /d MON,TUE,WED,THU,FRI /st 18:30
-```
-
-詳見 [HANDOFF.md](HANDOFF.md) 第十二輪紀錄。
+本機排程 `TwStockDbDaily`（週一至五 18:30）已註冊，細節與直譯器依賴警告見
+[HANDOFF.md](HANDOFF.md) 第十二輪紀錄。停用：`schtasks /delete /tn TwStockDbDaily /f`。
 
 ## 專案定位與慣例
 

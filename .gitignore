@@ -4,9 +4,13 @@ __pycache__/
 .venv/
 *.egg-info/
 
-# data/tw_stocks.db 刻意「不」排除 —— 這是本專案的交付物本體（~300KB，小），
-# 之後的視覺化網頁預計直接讀這個檔案，track 進 repo 比每次重新 build 方便。
-# 理由詳見 HANDOFF.md「關鍵決策」。
+# data/tw_stocks.db 自 2026-07-17 公開發布起「排除」—— 第一輪時只有 ~300KB 所以曾
+# track 進 git，但全市場 3 年資料使它成長到 ~240MB，超過 GitHub 單檔 100MB 上限，
+# 且歷史 blob 讓 .git 膨脹到 306MB。公開發布前已用 git filter-repo 從全部歷史移除。
+# 重建方式：依序跑 build_db.py 起的各 build 腳本（見 README「每日更新」與 AGENTS.md）。
+data/tw_stocks.db
+data/*.db
 
-# refresh_daily.py 的執行 log，純執行紀錄非資料本體，會持續增長（有內建輪替但仍不必進 git）
+# refresh log（腳本自寫 + 排程 stdout 捕捉），純執行紀錄非資料本體
 data/refresh.log
+data/refresh_task.log

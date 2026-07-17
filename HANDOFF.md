@@ -551,6 +551,11 @@
   - **`data/tw_stocks.db` track 進 git，不放進 .gitignore**：檔案只有約 300KB
     （純基本資料，無價量歷史），且之後的視覺化網頁預計直接讀這個檔案，track 進 repo
     比每次都要求使用者先跑 build_db.py 方便，之後刷新只要重新 commit 覆蓋即可。
+    **【2026-07-17 公開發布時反轉此決策】**：DB 隨全市場 3 年資料成長到 ~240MB，超過
+    GitHub 單檔 100MB 上限、歷史 blob 使 .git 膨脹到 306MB。公開發布前已 `git rm
+    --cached` 並用 `git filter-repo` 從全部歷史移除（發布前本機有 mirror 備份
+    `../tw-stock-db-backup.git`），改為「用 build 腳本重建」，.gitignore 已更新。
+    儀表板不受影響（`dashboard.html` 資料內嵌，不需要 DB 檔案就能看）。
   - **build_db.py 是整批刷新（DELETE + 整批 INSERT），不是逐筆 upsert**：因為兩個資料源
     都只提供「當下最新」快照、沒有增量更新語意，逐筆比對只會增加複雜度沒有實質好處。
   - **不用 pandas**：資料量小（不到 2000 列）、只需一次性批次寫入，直接用 `sqlite3`
