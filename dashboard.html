@@ -34,6 +34,19 @@
   .heat-wrap { overflow-x: auto; border: 1px solid #eee; }
   .legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #666; margin: 6px 0; }
   .legend .bar { width: 160px; height: 12px; background: linear-gradient(to right, #D85A30, #ffffff, #378ADD); }
+  .sort-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; flex-wrap: wrap; }
+  .sort-row label { font-size: 13px; color: #333; }
+  .sort-row select { font-size: 13px; padding: 4px 8px; }
+  .custom-order-panel { margin: 6px 0 10px; }
+  ol.order-list { list-style: none; margin: 0; padding: 0; max-width: 420px; border: 1px solid #eee;
+                  border-radius: 4px; background: #fff; }
+  .order-item { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-bottom: 1px solid #f2f2f2;
+                cursor: grab; }
+  .order-item:last-child { border-bottom: none; }
+  .order-item.dragging { opacity: 0.4; }
+  .order-item span { flex: 1; font-size: 13px; }
+  .order-btn { font-size: 11px; padding: 2px 6px; border: 1px solid #ccc; background: #f5f5f5; border-radius: 3px;
+               cursor: pointer; }
   .rank-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   .rank-grid table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .rank-grid th, .rank-grid td { padding: 3px 6px; border-bottom: 1px solid #eee; text-align: right; }
@@ -83,6 +96,19 @@
   <h2>板塊熱力圖</h2>
   <p class="note">34 個官方產業別板塊（依 3 年總金額活動量排序）x 150 週，色階：藍=淨流入、橘紅=淨流出、白=近零。
   滑鼠移到格子上可看板塊/週期間/金額。</p>
+  <div class="sort-row">
+    <label for="sectorSortMode">板塊排序：</label>
+    <select id="sectorSortMode">
+      <option value="activity">活動量（預設）</option>
+      <option value="stroke">名稱筆劃</option>
+      <option value="custom">自訂</option>
+    </select>
+    <button type="button" class="toggle" id="sectorOrderResetBtn">重設為預設</button>
+  </div>
+  <div class="custom-order-panel" id="sectorCustomOrderPanel" style="display:none;">
+    <p class="note">拖曳排列，或用每列的 ↑/↓ 按鈕調整順序（無障礙備援）。排序結果會套用到下方熱力圖列順序與下鑽選單。</p>
+    <ol class="order-list" id="sectorOrderList"></ol>
+  </div>
   <div class="legend"><span>淨流出</span><span class="bar"></span><span>淨流入</span></div>
   <div class="heat-wrap"><table class="heat" id="sectorHeatTable"></table></div>
 </section>
@@ -218,6 +244,7 @@ function colorScale(v, scaleMax) {
 }
 
 function buildHeatTable(tableEl, heat, weeks) {
+  tableEl.innerHTML = '';
   const allVals = heat.matrix.flat();
   const absSorted = allVals.map(Math.abs).sort((a, b) => a - b);
   const p95 = absSorted[Math.floor(absSorted.length * 0.95)] || 1;
@@ -250,7 +277,6 @@ function buildHeatTable(tableEl, heat, weeks) {
   tableEl.appendChild(tbody);
 }
 
-buildHeatTable(document.getElementById('sectorHeatTable'), DATA.sector_heat, DATA.weeks);
 buildHeatTable(document.getElementById('groupHeatTable'), DATA.group_heat, DATA.weeks);
 
 // ---- 排行 ----
@@ -342,6 +368,207 @@ makeDrill(
   document.getElementById('groupDrillTable'), DATA.group_heat, DATA.group_drill,
   document.getElementById('groupRankGrid'), DATA.group_rank
 );
+
+// ---- 板塊排序自訂（活動量/名稱筆劃/自訂，套用到熱力圖列順序 + 下鑽選單選項順序，
+// 排行榜依資料排序、語意不同，不受影響） ----
+const SECTOR_ORDER_STORAGE_KEY = 'twstockdb.sectorOrder.v1';
+const activityOrder = DATA.sector_heat.labels.slice();
+let currentSectorMode = 'activity';
+let currentSectorOrder = activityOrder.slice();
+let customSectorOrder = null; // 只在使用者切到「自訂」後才有值
+let sectorDragIndex = null;
+
+const sectorSortModeSelect = document.getElementById('sectorSortMode');
+const sectorCustomPanel = document.getElementById('sectorCustomOrderPanel');
+const sectorOrderListEl = document.getElementById('sectorOrderList');
+const sectorOrderResetBtn = document.getElementById('sectorOrderResetBtn');
+const sectorHeatTableEl = document.getElementById('sectorHeatTable');
+const sectorDrillSelectEl = document.getElementById('sectorDrillSelect');
+
+function loadSectorOrderPref() {
+  try {
+    const raw = localStorage.getItem(SECTOR_ORDER_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch (e) {
+    // localStorage 不可用（例如隱私模式）：靜默降級，功能只在 session 內有效
+    return null;
+  }
+}
+
+function saveSectorOrderPref(mode, order) {
+  try {
+    localStorage.setItem(SECTOR_ORDER_STORAGE_KEY, JSON.stringify({ mode, order }));
+  } catch (e) {
+    // 同上，寫入失敗不影響功能，只是不會跨 session 記住
+  }
+}
+
+function persistSectorOrder() {
+  saveSectorOrderPref(currentSectorMode, customSectorOrder || []);
+}
+
+function sanitizeOrder(order, allLabels) {
+  const allSet = new Set(allLabels);
+  const filtered = (order || []).filter(name => allSet.has(name));
+  const missing = allLabels.filter(name => !filtered.includes(name));
+  return filtered.concat(missing);
+}
+
+function strokeSort(labels) {
+  let collator;
+  try {
+    collator = new Intl.Collator('zh-Hant-TW-u-co-stroke');
+  } catch (e) {
+    collator = new Intl.Collator('zh-Hant');
+  }
+  return labels.slice().sort((a, b) => collator.compare(a, b));
+}
+
+function heatRowByLabel(heat, label) {
+  const idx = heat.labels.indexOf(label);
+  return idx >= 0 ? heat.matrix[idx] : heat.matrix[0].map(() => 0);
+}
+
+function reorderSelectOptions(selectEl, orderedLabels) {
+  const prevValue = selectEl.value;
+  selectEl.innerHTML = '';
+  orderedLabels.forEach(label => {
+    const opt = document.createElement('option');
+    opt.value = label; opt.textContent = label;
+    selectEl.appendChild(opt);
+  });
+  if (orderedLabels.includes(prevValue)) selectEl.value = prevValue;
+}
+
+function computeSectorOrder() {
+  if (currentSectorMode === 'stroke') return strokeSort(activityOrder);
+  if (currentSectorMode === 'custom') return sanitizeOrder(customSectorOrder, activityOrder);
+  return activityOrder.slice();
+}
+
+function applySectorOrder() {
+  currentSectorOrder = computeSectorOrder();
+  const orderedHeat = {
+    labels: currentSectorOrder,
+    matrix: currentSectorOrder.map(label => heatRowByLabel(DATA.sector_heat, label)),
+  };
+  buildHeatTable(sectorHeatTableEl, orderedHeat, DATA.weeks);
+  reorderSelectOptions(sectorDrillSelectEl, currentSectorOrder);
+}
+
+function renderSectorOrderList() {
+  sectorOrderListEl.innerHTML = '';
+  customSectorOrder.forEach((label, idx) => {
+    const li = document.createElement('li');
+    li.className = 'order-item';
+    li.draggable = true;
+    li.dataset.index = String(idx);
+    li.addEventListener('dragstart', handleSectorDragStart);
+    li.addEventListener('dragover', handleSectorDragOver);
+    li.addEventListener('drop', handleSectorDrop);
+    li.addEventListener('dragend', () => li.classList.remove('dragging'));
+
+    const span = document.createElement('span');
+    span.textContent = label;
+    li.appendChild(span);
+
+    const btnUp = document.createElement('button');
+    btnUp.type = 'button'; btnUp.className = 'order-btn'; btnUp.textContent = '↑';
+    btnUp.setAttribute('aria-label', '上移 ' + label);
+    btnUp.addEventListener('click', () => moveSectorItemUp(idx));
+    li.appendChild(btnUp);
+
+    const btnDown = document.createElement('button');
+    btnDown.type = 'button'; btnDown.className = 'order-btn'; btnDown.textContent = '↓';
+    btnDown.setAttribute('aria-label', '下移 ' + label);
+    btnDown.addEventListener('click', () => moveSectorItemDown(idx));
+    li.appendChild(btnDown);
+
+    sectorOrderListEl.appendChild(li);
+  });
+}
+
+function moveSectorItemUp(idx) {
+  if (idx <= 0) return;
+  const arr = customSectorOrder;
+  [arr[idx - 1], arr[idx]] = [arr[idx], arr[idx - 1]];
+  renderSectorOrderList();
+  applySectorOrder();
+  persistSectorOrder();
+}
+
+function moveSectorItemDown(idx) {
+  if (idx >= customSectorOrder.length - 1) return;
+  const arr = customSectorOrder;
+  [arr[idx], arr[idx + 1]] = [arr[idx + 1], arr[idx]];
+  renderSectorOrderList();
+  applySectorOrder();
+  persistSectorOrder();
+}
+
+function handleSectorDragStart(e) {
+  sectorDragIndex = Number(e.currentTarget.dataset.index);
+  e.currentTarget.classList.add('dragging');
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+}
+
+function handleSectorDragOver(e) {
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+}
+
+function handleSectorDrop(e) {
+  e.preventDefault();
+  const targetIndex = Number(e.currentTarget.dataset.index);
+  if (sectorDragIndex === null || sectorDragIndex === targetIndex) return;
+  const item = customSectorOrder.splice(sectorDragIndex, 1)[0];
+  customSectorOrder.splice(targetIndex, 0, item);
+  sectorDragIndex = null;
+  renderSectorOrderList();
+  applySectorOrder();
+  persistSectorOrder();
+}
+
+sectorSortModeSelect.addEventListener('change', () => {
+  const newMode = sectorSortModeSelect.value;
+  if (newMode === 'custom' && !customSectorOrder) {
+    // 首次切到「自訂」：以當下顯示順序為初始值
+    customSectorOrder = currentSectorOrder.slice();
+  }
+  currentSectorMode = newMode;
+  sectorCustomPanel.style.display = newMode === 'custom' ? '' : 'none';
+  if (newMode === 'custom') renderSectorOrderList();
+  applySectorOrder();
+  persistSectorOrder();
+});
+
+sectorOrderResetBtn.addEventListener('click', () => {
+  customSectorOrder = null;
+  currentSectorMode = 'activity';
+  sectorSortModeSelect.value = 'activity';
+  sectorCustomPanel.style.display = 'none';
+  applySectorOrder();
+  persistSectorOrder();
+});
+
+(function initSectorOrder() {
+  const pref = loadSectorOrderPref();
+  if (pref && pref.mode === 'custom' && Array.isArray(pref.order) && pref.order.length) {
+    customSectorOrder = sanitizeOrder(pref.order, activityOrder);
+    currentSectorMode = 'custom';
+  } else if (pref && pref.mode === 'stroke') {
+    currentSectorMode = 'stroke';
+  } else {
+    currentSectorMode = 'activity';
+  }
+  sectorSortModeSelect.value = currentSectorMode;
+  sectorCustomPanel.style.display = currentSectorMode === 'custom' ? '' : 'none';
+  if (currentSectorMode === 'custom') renderSectorOrderList();
+  applySectorOrder();
+})();
 
 // ---- 投信特寫 ----
 const trustKpiDiv = document.getElementById('trustKpis');

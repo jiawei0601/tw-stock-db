@@ -225,3 +225,64 @@ def test_key_dom_ids_present(exported_html, dom_id):
 def test_light_color_scheme_locked(exported_html):
     """避免瀏覽器深色模式反轉，見既有教訓：明確鎖 light + 白底黑字。"""
     assert "color-scheme: light" in exported_html
+
+
+# ---- 【第十三輪】板塊排序自訂 ----
+
+@pytest.mark.parametrize("dom_id", [
+    "sectorSortMode", "sectorCustomOrderPanel", "sectorOrderList", "sectorOrderResetBtn",
+])
+def test_sector_sort_dom_ids_present(exported_html, dom_id):
+    assert f'id="{dom_id}"' in exported_html
+
+
+def test_sector_sort_mode_options_present(exported_html):
+    """三種排序模式：活動量（預設）/名稱筆劃/自訂。"""
+    assert 'value="activity"' in exported_html
+    assert 'value="stroke"' in exported_html
+    assert 'value="custom"' in exported_html
+    assert "活動量（預設）" in exported_html
+    assert "名稱筆劃" in exported_html
+    assert "自訂" in exported_html
+
+
+def test_sector_order_localstorage_key_present(exported_html):
+    assert "twstockdb.sectorOrder.v1" in exported_html
+
+
+def test_sector_order_drag_and_move_functions_present(exported_html):
+    """拖放（HTML5 drag and drop）+ 上/下移按鈕的無障礙備援，函式名須存在。"""
+    for fn_name in [
+        "handleSectorDragStart",
+        "handleSectorDragOver",
+        "handleSectorDrop",
+        "moveSectorItemUp",
+        "moveSectorItemDown",
+    ]:
+        assert fn_name in exported_html
+
+
+def test_sector_order_reset_button_label_present(exported_html):
+    assert "重設為預設" in exported_html
+
+
+def test_sector_order_localstorage_graceful_degradation(exported_html):
+    """localStorage 不可用（例如隱私模式）時必須用 try/catch 包住，靜默降級，
+    不可讓例外中斷整頁渲染。"""
+    assert "function loadSectorOrderPref" in exported_html
+    assert "function saveSectorOrderPref" in exported_html
+    load_fn = re.search(r"function loadSectorOrderPref\(\).*?\n\}", exported_html, re.S).group(0)
+    save_fn = re.search(r"function saveSectorOrderPref\([^)]*\).*?\n\}", exported_html, re.S).group(0)
+    assert "try" in load_fn and "catch" in load_fn
+    assert "try" in save_fn and "catch" in save_fn
+
+
+def test_sector_order_applies_to_drill_select_not_ranking(exported_html):
+    """排序結果套用到熱力圖 + 下鑽選單，排行榜（rank grid）不受影響，
+    確認 applySectorOrder 有動到 drill select 而非 rank grid。"""
+    m = re.search(r"function applySectorOrder\(\).*?\n\}", exported_html, re.S)
+    assert m is not None
+    body = m.group(0)
+    assert "sectorDrillSelectEl" in body
+    assert "sectorHeatTableEl" in body
+    assert "RankGrid" not in body

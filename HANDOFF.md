@@ -2,13 +2,71 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-17（第十二輪追加：repo 已公開發布到 GitHub +
-  `refresh_daily.py` 新增第 12 步 `publish`，把 `dashboard.html`/`analysis/*.html`
-  的每日變更自動 commit + push 到公開 repo，詳見下方「【第十二輪追加】repo 公開發布 +
-  自動發布步驟」小節）
+- 最後更新：Claude Code @ 2026-07-17（第十三輪：`dashboard.html` 板塊熱力圖新增
+  「排序自訂」功能，詳見下方「【第十三輪】板塊熱力圖排序自訂」小節）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
+  - **【第十三輪】`dashboard.html` 板塊熱力圖排序自訂**：使用者要求在「板塊熱力圖」
+    區塊頂部加排序控制列，改 `export_dashboard.py` 的內嵌 JS/HTML 模板（不改資料撈取
+    邏輯，純前端功能）：
+    - **三種排序模式**（`<select id="sectorSortMode">`）：活動量（預設，沿用既有
+      3 年總金額活動量排序）／名稱筆劃（`Intl.Collator('zh-Hant-TW-u-co-stroke')`，
+      找不到該 locale collation 時 fallback 到 `'zh-Hant'`）／自訂。
+    - **自訂模式**：切換到自訂時顯示可重排面板（`#sectorCustomOrderPanel` +
+      `#sectorOrderList`），每列板塊支援 **HTML5 拖放**（`draggable`/`dragstart`/
+      `dragover`/`drop`，函式 `handleSectorDragStart`/`handleSectorDragOver`/
+      `handleSectorDrop`）＋ **↑/↓ 按鈕**（`moveSectorItemUp`/`moveSectorItemDown`，
+      拖放的無障礙備援，每個按鈕有 `aria-label`）；`#sectorOrderResetBtn`「重設為
+      預設」清除自訂、回活動量排序。首次切到自訂時以**當下顯示順序**為初始值
+      （不管當時是活動量還是筆劃模式）。
+    - **排序結果套用範圍**：熱力圖列順序（`buildHeatTable` 改為每次呼叫先清空
+      `tableEl.innerHTML` 以支援重複渲染）＋下鑽 `<select id="sectorDrillSelect">`
+      的選項順序（`reorderSelectOptions()`，重排時保留原本選取值不變，因為
+      `makeDrill()` 的圖表渲染邏輯是用 `heat.labels.indexOf(label)` 查值、不依賴
+      DOM 選項順序，重排選項不會弄壞已渲染的圖表）。**排行榜（板塊排行 Top10）刻意
+      不受影響**——那是依資料數值排序，跟這裡的「板塊清單顯示順序」語意不同，符合
+      規格要求。**只套用在板塊熱力圖，不含族群視圖**（規格明確寫「板塊熱力圖」
+      區塊，族群視圖沿用原有固定活動量順序）。
+    - **持久化（`localStorage`，key `twstockdb.sectorOrder.v1`，存 `{mode, order}`）**：
+      `loadSectorOrderPref()`/`saveSectorOrderPref()` 皆用 `try/catch` 包住，
+      `localStorage` 不可用時（例如隱私模式）靜默降級為 session 內有效，不拋例外
+      中斷渲染。載入時用 `sanitizeOrder()` 驗證：不存在的板塊名稱剔除、缺少的板塊
+      （未來板塊清單變動）補到清單末尾。**重要語意（跨 origin 不互通）**：這是
+      **瀏覽器端 `localStorage`**，GitHub Pages（`jiawei0601.github.io`）與本機
+      `file://` 開啟是不同 origin，各自保存獨立的自訂排序，不會互相同步；`refresh_
+      daily.py` 每日排程重新匯出覆寫 `dashboard.html` 檔案內容，**不會清掉使用者
+      瀏覽器裡已存的 `localStorage`**（存放位置跟檔案內容無關），這代表使用者一旦
+      設定過自訂排序，之後每天看到的頁面都會沿用該排序，是預期行為。
+    - `tests/test_dashboard_export.py` 新增 10 個測試：排序控制列四個 DOM id 存在
+      （`sectorSortMode`/`sectorCustomOrderPanel`/`sectorOrderList`/
+      `sectorOrderResetBtn`）、三種模式的 `<option>` 值與中文標籤都存在、
+      `localStorage` key 字串存在、拖放與上下移五個函式名都存在、「重設為預設」
+      按鈕文字存在、`loadSectorOrderPref`/`saveSectorOrderPref` 函式體內都有
+      `try`/`catch`（驗證靜默降級）、`applySectorOrder()` 函式體內確實動到
+      `sectorDrillSelectEl`/`sectorHeatTableEl` 但不含 `RankGrid`（驗證排行榜不受
+      影響）。全專案 `python -m pytest tests/ -q` 共 **160 個測試，全綠**（150 個
+      既有 + 10 個新增，既有測試零改動、零壞）。
+    - **實機驗證**（用 Browser pane 開啟 `file://` 開啟匯出的 `dashboard.html` 實際
+      操作，不只是靜態文字比對）：切到自訂模式後點「↓」把 `半導體業` 往下移一位，
+      確認熱力圖第一列/下鑽選單第一個選項都同步變成 `電腦及週邊設備業`，
+      `localStorage` 內容正確寫入 `{"mode":"custom","order":[...]}`；點「重設為預設」
+      後熱力圖第一列正確變回 `半導體業`、`localStorage` 變成
+      `{"mode":"activity","order":[]}`；切到名稱筆劃模式後熱力圖第一列變成
+      `化學工業`（筆劃排序正確生效，不是活動量順序）。三種模式與拖放/按鈕/重設
+      互動皆實測正常，非只靠單元測試斷言。
+    - `python -c` 驗證匯出的 `dashboard.html`：內嵌 `const DATA = {...}` JSON 仍可
+      `json.loads()` 解析、無殘留 `__DATA_JSON__`/`__REPORTS_JSON__` 未替換 token、
+      34 板塊/150 週數字與匯出前一致（純前端功能未動到 Python 端資料撈取邏輯）。
+    - `AGENTS.md`（`export_dashboard.py` 說明段落追加本輪功能描述）／`README.md`
+      （「怎麼打開儀表板」段落追加一句）同步更新。
+    - **無偏離**：規格要求的三模式、拖放+按鈕雙軌、首次自訂以當下順序為初始值、
+      localStorage 驗證與降級、排行榜不受影響、只做板塊熱力圖不含族群視圖，全數如實
+      實作；DOM id 與函式命名為本輪任務自行決定（規格未指定具體名稱），已在測試與
+      本節如實記錄供未來 agent 對照。
+  - **【第十二輪追加】repo 已公開發布到 GitHub + `refresh_daily.py` 新增第 12 步
+    `publish`**，把 `dashboard.html`/`analysis/*.html` 的每日變更自動 commit + push
+    到公開 repo，詳見下方「【第十二輪追加】repo 公開發布 + 自動發布步驟」小節。
   - **【第十二輪】`refresh_daily.py` —— 每日刷新腳本**：把前十一輪累積的十一個
     build/export 腳本（`build_institutional_summary.py` → `build_daily_prices.py` →
     `build_taiex.py` → `build_revenue_history.py` → `build_fundamentals.py` →
