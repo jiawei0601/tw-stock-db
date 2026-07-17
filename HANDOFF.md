@@ -2,11 +2,58 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-17（第十三輪：`dashboard.html` 板塊熱力圖新增
-  「排序自訂」功能，詳見下方「【第十三輪】板塊熱力圖排序自訂」小節）
+- 最後更新：Claude Code @ 2026-07-17（第十四輪：`dashboard.html` 六大區塊全部
+  改成可收折，詳見下方「【第十四輪】六大區塊可收折」小節）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
+  - **【第十四輪】`dashboard.html` 六大區塊可收折**：使用者要求「把總覽、板塊熱力圖、
+    板塊排行、族群視圖、投信特寫這幾個資料區塊設置成可以收折，我只需要點開要進行對比
+    的板塊就可以進行對照」，改 `export_dashboard.py` 的內嵌 JS/HTML 模板（純前端功能，
+    不改資料撈取邏輯）：
+    - **六個區塊全部可收折**（總覽/板塊熱力圖/板塊排行與下鑽/族群視圖/投信特寫/使用
+      須知，比使用者原話多納入「使用須知」湊滿六個，理由：同一套機制沒有理由排除）：
+      每個 `<h2 class="sec-h" data-section="...">` 是整行可點擊標題（`role="button"
+      tabindex="0"`，支援 Enter/Space 鍵盤操作），標題左側 `<span class="arrow">`
+      顯示 ▼（展開）/▶（收合），區塊內容包在 `<div class="sec-content" id="<id>-
+      content">` 裡，收合用 `.sec-content.is-collapsed { display: none; }`（CSS
+      class 而非 inline style，方便測試斷言）。
+    - **預設全部展開**（markup 上 `aria-expanded="true"` 硬寫死，不依賴 JS 才顯示
+      內容，首訪者不會看到空頁）；收合狀態存 `localStorage`（key `twstockdb.
+      sectionCollapse.v1`，存 `{sectionId: boolean}`），`loadSectionCollapsePref()`/
+      `saveSectionCollapsePref()` 皆 `try/catch` 靜默降級（比照第十三輪排序功能的
+      既有寫法），跟 `twstockdb.sectorOrder.v1` 是各自獨立的 key，互不干擾。
+    - **導覽列尾端**加「全部展開」/「全部收合」兩個按鈕（`#expandAllBtn`/
+      `#collapseAllBtn`），走跟單一區塊切換同一條 `setSectionCollapsed()` 路徑
+      （不是另開一套邏輯），一次對六個區塊套用、一次性寫入 `localStorage`。
+    - **導覽列錨點自動展開**：`header nav a[href^="#"]` 點擊時若目標區塊收合中，
+      `preventDefault()` 後先呼叫 `setSectionCollapsed(id, false)` 展開、再手動
+      `scrollIntoView()`；未收合的區塊維持瀏覽器原生錨點跳轉（不攔截）。
+    - **【Chart.js 收合展開陷阱，本輪最主要的技術風險】** 用 `display:none` 收合
+      含 `<canvas>` 的區塊（總覽/板塊排行/族群視圖/投信特寫，共 5 個 Chart 實例：
+      `taiexChart`／`marketChart`／`sectorDrillChartRef`／`groupDrillChartRef`／
+      `trustChartRef`），重新展開時圖表尺寸可能崩壞（canvas 內部 render buffer
+      停留在收合前的舊尺寸，不會自動跟隨容器新尺寸）。修法：`makeDrill()` 改為
+      `return chart`，`trustChart` 改存成 `const trustChartRef = new Chart(...)`，
+      讓這 5 個實例在頂層作用域可被取用；`chartsForSection(sectionId)` 回傳該區塊
+      涵蓋的 Chart 實例清單，`resizeSectionCharts()` 對清單逐一呼叫 `.resize()`，
+      在 `setSectionCollapsed(id, false)`（展開路徑）裡呼叫。**已用真實瀏覽器
+      實測驗證**（見下方「怎麼跑 / 怎麼測」）：故意在區塊收合時把瀏覽器視窗從
+      372px 寬改成 900px 寬（模擬「收合期間版面變動」的最壞情況），收合中
+      `canvas.width` 停留在收合前的舊值（303，`clientWidth` 因 `display:none`
+      讀出 0），展開瞬間 `resize()` 正確把 `canvas.width` 更新成新容器對應的
+      1056（`clientWidth` 844 x `devicePixelRatio` 1.25），證實這條路徑不是
+      裝飾性程式碼、確實在修正真實會發生的尺寸崩壞問題。
+    - **跟第十三輪排序面板互不干擾**：排序控制列（`#sectorSortMode`／
+      `#sectorCustomOrderPanel` 等）整組包在 `heatmap-content` 裡，收合「板塊
+      熱力圖」區塊時排序面板一起被 `display:none` 收進去，展開時原樣恢復
+      （排序狀態本身存在獨立的 `localStorage` key，不受收合狀態影響）。
+    - **測試**：`tests/test_dashboard_export.py` 新增 23 個測試（六區塊標題
+      markup／`sec-content` wrapper／CSS class／`localStorage` key／graceful
+      degradation／全部展開全部收合按鈕與函式／預設展開／`chartsForSection`
+      涵蓋全部 5 個 Chart 實例／`resizeSectionCharts` 呼叫 `.resize()`／導覽列
+      錨點自動展開／同一個 `toggleSection` 函式），全專案 pytest 183 個測試全綠
+      （160 + 23 新增）。
   - **【第十三輪】`dashboard.html` 板塊熱力圖排序自訂**：使用者要求在「板塊熱力圖」
     區塊頂部加排序控制列，改 `export_dashboard.py` 的內嵌 JS/HTML 模板（不改資料撈取
     邏輯，純前端功能）：

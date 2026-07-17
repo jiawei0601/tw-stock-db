@@ -65,6 +65,11 @@
   #notice { background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 16px 20px; font-size: 13px; }
   #notice ul { margin: 6px 0; padding-left: 20px; }
   footer { text-align: center; font-size: 12px; color: #aaa; padding: 20px; }
+  h2.sec-h { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px; }
+  h2.sec-h:hover { opacity: 0.8; }
+  h2.sec-h .arrow { font-size: 13px; color: #378ADD; width: 14px; display: inline-block; text-align: center; }
+  .sec-content.is-collapsed { display: none; }
+  .collapse-controls { display: flex; gap: 6px; }
 </style>
 </head><body>
 <header>
@@ -77,12 +82,17 @@
     <a href="#trust">投信特寫</a>
     <a href="#notice">使用須知</a>
   </nav>
+  <div class="collapse-controls">
+    <button type="button" class="toggle" id="expandAllBtn">全部展開</button>
+    <button type="button" class="toggle" id="collapseAllBtn">全部收合</button>
+  </div>
   <span class="meta">資料至 <span id="latestDate"></span>｜金額口徑（億元，股數 x 收盤價約略值）</span>
 </header>
 <main>
 
 <section id="overview">
-  <h2>總覽</h2>
+  <h2 class="sec-h" data-section="overview" role="button" tabindex="0" aria-expanded="true"><span class="arrow" aria-hidden="true">▼</span>總覽</h2>
+  <div class="sec-content" id="overview-content">
   <p class="note">上圖為 TAIEX 週線，下圖為全市場三大法人週度淨買賣超金額（可切換 外資/投信/自營商/合計），
   兩圖時間軸對齊，共用同一組週別。</p>
   <div class="charts-row">
@@ -90,10 +100,12 @@
     <div class="btn-row" id="marketToggle"></div>
     <div class="chart-box tall"><canvas id="marketChart"></canvas></div>
   </div>
+  </div>
 </section>
 
 <section id="heatmap">
-  <h2>板塊熱力圖</h2>
+  <h2 class="sec-h" data-section="heatmap" role="button" tabindex="0" aria-expanded="true"><span class="arrow" aria-hidden="true">▼</span>板塊熱力圖</h2>
+  <div class="sec-content" id="heatmap-content">
   <p class="note">34 個官方產業別板塊（依 3 年總金額活動量排序）x 150 週，色階：藍=淨流入、橘紅=淨流出、白=近零。
   滑鼠移到格子上可看板塊/週期間/金額。</p>
   <div class="sort-row">
@@ -111,19 +123,23 @@
   </div>
   <div class="legend"><span>淨流出</span><span class="bar"></span><span>淨流入</span></div>
   <div class="heat-wrap"><table class="heat" id="sectorHeatTable"></table></div>
+  </div>
 </section>
 
 <section id="ranking">
-  <h2>板塊排行與下鑽</h2>
+  <h2 class="sec-h" data-section="ranking" role="button" tabindex="0" aria-expanded="true"><span class="arrow" aria-hidden="true">▼</span>板塊排行與下鑽</h2>
+  <div class="sec-content" id="ranking-content">
   <div class="rank-grid" id="sectorRankGrid"></div>
   <h3>下鑽：選擇板塊看 150 週金額流走勢與成分股</h3>
   <select id="sectorDrillSelect"></select>
   <div class="chart-box tall"><canvas id="sectorDrillChart"></canvas></div>
   <table class="drill-table" id="sectorDrillTable"></table>
+  </div>
 </section>
 
 <section id="groups">
-  <h2>族群視圖（概念股）</h2>
+  <h2 class="sec-h" data-section="groups" role="button" tabindex="0" aria-expanded="true"><span class="arrow" aria-hidden="true">▼</span>族群視圖（概念股）</h2>
+  <div class="sec-content" id="groups-content">
   <div class="warn-box">族群成分重疊（例如台積電同時屬於多個概念股族群），以下數字<b>不可跨族群加總</b>，
   只在單一族群自己內部的語意下解讀。</div>
   <div class="legend"><span>淨流出</span><span class="bar"></span><span>淨流入</span></div>
@@ -133,24 +149,29 @@
   <select id="groupDrillSelect"></select>
   <div class="chart-box tall"><canvas id="groupDrillChart"></canvas></div>
   <table class="drill-table" id="groupDrillTable"></table>
+  </div>
 </section>
 
 <section id="trust">
-  <h2>投信特寫</h2>
+  <h2 class="sec-h" data-section="trust" role="button" tabindex="0" aria-expanded="true"><span class="arrow" aria-hidden="true">▼</span>投信特寫</h2>
+  <div class="sec-content" id="trust-content">
   <p class="note">五份分析報告中唯一具統計顯著規律的法人別：投信有季底作帳現象、連續買賣超對自身後續動向有一定慣性。</p>
   <div class="kpi-row" id="trustKpis"></div>
   <div class="chart-box tall"><canvas id="trustChart"></canvas></div>
   <h3>投信目前連買中的板塊（前 5 名，依連續淨買天數排序）</h3>
   <table class="drill-table" id="trustSectorTable"></table>
+  </div>
 </section>
 
 <section id="notice">
-  <h2>使用須知</h2>
+  <h2 class="sec-h" data-section="notice" role="button" tabindex="0" aria-expanded="true"><span class="arrow" aria-hidden="true">▼</span>使用須知</h2>
+  <div class="sec-content" id="notice-content">
   <p>本頁是<b>資金結構的觀察工具，不是訊號產生器</b>。專案累積的五份分析報告已確立：
   法人流向資料「描述當下有效、預測未來全部失敗」——能如實呈現資金去了哪裡，
   但沒有找到可扣除交易成本後仍站得住腳的預測性訊號，請勿把任何頁面上的排行/熱力圖
   當成買賣建議。</p>
   <ul id="reportList"></ul>
+  </div>
 </section>
 
 </main>
@@ -356,14 +377,15 @@ function makeDrill(selectEl, chartCanvas, tableEl, heat, drillData, rankContaine
   renderLabel(heat.labels[0]);
 
   buildRankGrid(rankContainer, rankData, '', renderLabel);
+  return chart;
 }
 
-makeDrill(
+const sectorDrillChartRef = makeDrill(
   document.getElementById('sectorDrillSelect'), document.getElementById('sectorDrillChart'),
   document.getElementById('sectorDrillTable'), DATA.sector_heat, DATA.sector_drill,
   document.getElementById('sectorRankGrid'), DATA.sector_rank
 );
-makeDrill(
+const groupDrillChartRef = makeDrill(
   document.getElementById('groupDrillSelect'), document.getElementById('groupDrillChart'),
   document.getElementById('groupDrillTable'), DATA.group_heat, DATA.group_drill,
   document.getElementById('groupRankGrid'), DATA.group_rank
@@ -590,7 +612,7 @@ seasonalityP.style.width = '100%';
 seasonalityP.textContent = DATA.trust.seasonality_note;
 trustKpiDiv.appendChild(seasonalityP);
 
-new Chart(document.getElementById('trustChart'), {
+const trustChartRef = new Chart(document.getElementById('trustChart'), {
   type: 'bar',
   data: { labels: weekLabels, datasets: [{
     data: DATA.trust.market_weekly_trust, backgroundColor: marketColors(DATA.trust.market_weekly_trust),
@@ -624,6 +646,110 @@ REPORTS.forEach(r => {
   const li = document.createElement('li');
   li.textContent = 'analysis/' + r;
   reportListEl.appendChild(li);
+});
+
+// ---- 【第十四輪】區塊可收折：六大區塊（總覽/板塊熱力圖/板塊排行與下鑽/族群視圖/
+// 投信特寫/使用須知）點標題整行切換收合/展開，狀態存 localStorage，重整/每日重產
+// 頁面都保留使用者偏好；預設全部展開。Chart.js 陷阱：display:none 收合含 canvas 的
+// 區塊後，重新展開時圖表尺寸會崩壞（寬度算成 0），所以展開時要對該區塊內的 Chart
+// 實例呼叫 .resize()，見 chartsForSection()。 ----
+const SECTION_COLLAPSE_STORAGE_KEY = 'twstockdb.sectionCollapse.v1';
+const COLLAPSIBLE_SECTION_IDS = ['overview', 'heatmap', 'ranking', 'groups', 'trust', 'notice'];
+
+function loadSectionCollapsePref() {
+  try {
+    const raw = localStorage.getItem(SECTION_COLLAPSE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch (e) {
+    // localStorage 不可用（例如隱私模式）：靜默降級，功能只在 session 內有效
+    return {};
+  }
+}
+
+function saveSectionCollapsePref(state) {
+  try {
+    localStorage.setItem(SECTION_COLLAPSE_STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    // 同上，寫入失敗不影響功能，只是不會跨 session 記住
+  }
+}
+
+const sectionCollapseState = loadSectionCollapsePref();
+
+function chartsForSection(sectionId) {
+  if (sectionId === 'overview') return [taiexChart, marketChart];
+  if (sectionId === 'ranking') return [sectorDrillChartRef];
+  if (sectionId === 'groups') return [groupDrillChartRef];
+  if (sectionId === 'trust') return [trustChartRef];
+  return [];
+}
+
+function resizeSectionCharts(sectionId) {
+  chartsForSection(sectionId).forEach(c => {
+    if (c && typeof c.resize === 'function') c.resize();
+  });
+}
+
+function setSectionCollapsed(sectionId, collapsed, opts) {
+  opts = opts || {};
+  const header = document.querySelector('h2.sec-h[data-section="' + sectionId + '"]');
+  const content = document.getElementById(sectionId + '-content');
+  if (!header || !content) return;
+  content.classList.toggle('is-collapsed', collapsed);
+  header.setAttribute('aria-expanded', String(!collapsed));
+  const arrow = header.querySelector('.arrow');
+  if (arrow) arrow.textContent = collapsed ? '▶' : '▼';
+  sectionCollapseState[sectionId] = collapsed;
+  if (!collapsed) resizeSectionCharts(sectionId);
+  if (!opts.skipPersist) saveSectionCollapsePref(sectionCollapseState);
+}
+
+function toggleSection(sectionId) {
+  setSectionCollapsed(sectionId, !sectionCollapseState[sectionId]);
+}
+
+function expandAllSections() {
+  COLLAPSIBLE_SECTION_IDS.forEach(id => setSectionCollapsed(id, false, { skipPersist: true }));
+  saveSectionCollapsePref(sectionCollapseState);
+}
+
+function collapseAllSections() {
+  COLLAPSIBLE_SECTION_IDS.forEach(id => setSectionCollapsed(id, true, { skipPersist: true }));
+  saveSectionCollapsePref(sectionCollapseState);
+}
+
+// 初始化：套用已存偏好（沒有存過就是空物件，等同全部展開）
+COLLAPSIBLE_SECTION_IDS.forEach(id => {
+  setSectionCollapsed(id, sectionCollapseState[id] === true, { skipPersist: true });
+});
+
+document.querySelectorAll('h2.sec-h').forEach(header => {
+  const sectionId = header.dataset.section;
+  header.addEventListener('click', () => toggleSection(sectionId));
+  header.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggleSection(sectionId);
+    }
+  });
+});
+
+document.getElementById('expandAllBtn').addEventListener('click', expandAllSections);
+document.getElementById('collapseAllBtn').addEventListener('click', collapseAllSections);
+
+// 導覽列錨點：目標區塊若收合中，先展開再捲動過去
+document.querySelectorAll('header nav a[href^="#"]').forEach(a => {
+  a.addEventListener('click', (e) => {
+    const targetId = a.getAttribute('href').slice(1);
+    if (COLLAPSIBLE_SECTION_IDS.includes(targetId) && sectionCollapseState[targetId]) {
+      e.preventDefault();
+      setSectionCollapsed(targetId, false);
+      const el = document.getElementById(targetId);
+      if (el) el.scrollIntoView({ behavior: 'auto', block: 'start' });
+    }
+  });
 });
 </script>
 </body></html>

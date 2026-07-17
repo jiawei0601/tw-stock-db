@@ -286,3 +286,109 @@ def test_sector_order_applies_to_drill_select_not_ranking(exported_html):
     assert "sectorDrillSelectEl" in body
     assert "sectorHeatTableEl" in body
     assert "RankGrid" not in body
+
+
+# ---- 【第十四輪】六大區塊可收折 ----
+
+COLLAPSIBLE_SECTION_IDS = ["overview", "heatmap", "ranking", "groups", "trust", "notice"]
+
+
+@pytest.mark.parametrize("section_id", COLLAPSIBLE_SECTION_IDS)
+def test_section_header_has_collapse_toggle_markup(exported_html, section_id):
+    """每個區塊標題是 h2.sec-h，帶 data-section 屬性、可鍵盤操作（role=button/
+    tabindex），且有 ▼/▶ 指示符 span——點整行標題即可收折。"""
+    pattern = (
+        r'<h2 class="sec-h" data-section="' + section_id + r'"[^>]*role="button"[^>]*>'
+        r'<span class="arrow"[^>]*>▼</span>'
+    )
+    assert re.search(pattern, exported_html) is not None, f"{section_id} 標題缺少收折 markup"
+
+
+@pytest.mark.parametrize("section_id", COLLAPSIBLE_SECTION_IDS)
+def test_section_content_wrapper_present(exported_html, section_id):
+    """每個區塊內容都包在 id="<section>-content" 的 div.sec-content 裡，
+    這是收折時用來切換 display 的節點。"""
+    assert f'class="sec-content" id="{section_id}-content"' in exported_html
+
+
+def test_section_collapse_css_class_defined(exported_html):
+    """收折用 .sec-content.is-collapsed { display: none; }，不是 inline style，
+    方便測試斷言與未來擴充過場動畫。"""
+    assert ".sec-content.is-collapsed" in exported_html
+    assert "cursor: pointer" in exported_html
+
+
+def test_section_collapse_localstorage_key_present(exported_html):
+    assert "twstockdb.sectionCollapse.v1" in exported_html
+
+
+def test_section_collapse_localstorage_graceful_degradation(exported_html):
+    """localStorage 不可用時要 try/catch 靜默降級，不能讓例外中斷整頁渲染
+    （比照第十三輪排序功能的既有教訓）。"""
+    assert "function loadSectionCollapsePref" in exported_html
+    assert "function saveSectionCollapsePref" in exported_html
+    load_fn = re.search(r"function loadSectionCollapsePref\(\).*?\n\}", exported_html, re.S).group(0)
+    save_fn = re.search(r"function saveSectionCollapsePref\([^)]*\).*?\n\}", exported_html, re.S).group(0)
+    assert "try" in load_fn and "catch" in load_fn
+    assert "try" in save_fn and "catch" in save_fn
+
+
+@pytest.mark.parametrize("dom_id", ["expandAllBtn", "collapseAllBtn"])
+def test_expand_collapse_all_buttons_present(exported_html, dom_id):
+    assert f'id="{dom_id}"' in exported_html
+
+
+def test_expand_collapse_all_functions_present(exported_html):
+    assert "function expandAllSections" in exported_html
+    assert "function collapseAllSections" in exported_html
+    # 全部展開/收合要走跟單一區塊切換同一條 setSectionCollapsed 路徑，不是另開一套邏輯
+    expand_fn = re.search(r"function expandAllSections\(\).*?\n\}", exported_html, re.S).group(0)
+    collapse_fn = re.search(r"function collapseAllSections\(\).*?\n\}", exported_html, re.S).group(0)
+    assert "setSectionCollapsed" in expand_fn
+    assert "setSectionCollapsed" in collapse_fn
+
+
+def test_default_all_sections_expanded_in_markup(exported_html):
+    """首次造訪（無 localStorage 偏好）預設全部展開：markup 上 aria-expanded 都是
+    true、箭頭都是 ▼，不能讓首訪者看到空頁。"""
+    for section_id in COLLAPSIBLE_SECTION_IDS:
+        pattern = r'<h2 class="sec-h" data-section="' + section_id + r'"[^>]*aria-expanded="true"'
+        assert re.search(pattern, exported_html) is not None, f"{section_id} 預設應為展開狀態"
+
+
+def test_chart_resize_on_expand_function_present(exported_html):
+    """【Chart.js 陷阱】收合區塊用 display:none 隱藏 canvas，重新展開時圖表尺寸
+    可能崩壞，必須在展開路徑上呼叫 .resize()。"""
+    assert "function resizeSectionCharts" in exported_html
+    assert "function chartsForSection" in exported_html
+    resize_fn = re.search(r"function resizeSectionCharts\([^)]*\).*?\n\}", exported_html, re.S).group(0)
+    assert ".resize()" in resize_fn
+
+    set_fn = re.search(r"function setSectionCollapsed\([^)]*\).*?\n\}", exported_html, re.S).group(0)
+    assert "resizeSectionCharts" in set_fn
+
+
+def test_chart_resize_covers_all_chart_bearing_sections(exported_html):
+    """chartsForSection 要涵蓋全部含 canvas 的區塊（總覽/板塊排行/族群視圖/投信特寫），
+    熱力圖與使用須知沒有 canvas 不需要。"""
+    fn = re.search(r"function chartsForSection\([^)]*\).*?\n\}", exported_html, re.S).group(0)
+    for chart_ref in ["taiexChart", "marketChart", "sectorDrillChartRef", "groupDrillChartRef", "trustChartRef"]:
+        assert chart_ref in fn, f"{chart_ref} 未被收折展開時的 resize 邏輯涵蓋"
+
+
+def test_nav_anchor_auto_expands_collapsed_section(exported_html):
+    """導覽列錨點連結點擊時，若目標區塊收合要自動展開再捲動過去。"""
+    assert "nav a[href^=\"#\"]" in exported_html
+    nav_block = re.search(
+        r"document\.querySelectorAll\('header nav a\[href\^=\"#\"\]'\)\.forEach.*?\n\}\);",
+        exported_html, re.S,
+    )
+    assert nav_block is not None
+    assert "setSectionCollapsed" in nav_block.group(0)
+    assert "scrollIntoView" in nav_block.group(0)
+
+
+def test_collapsible_headers_all_use_same_toggle_function(exported_html):
+    """六個標題都綁同一個 toggleSection，不是各自重複邏輯。"""
+    assert "function toggleSection" in exported_html
+    assert "querySelectorAll('h2.sec-h')" in exported_html
