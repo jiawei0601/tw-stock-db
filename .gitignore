@@ -7,3 +7,6 @@ __pycache__/
 # data/tw_stocks.db 刻意「不」排除 —— 這是本專案的交付物本體（~300KB，小），
 # 之後的視覺化網頁預計直接讀這個檔案，track 進 repo 比每次重新 build 方便。
 # 理由詳見 HANDOFF.md「關鍵決策」。
+
+# refresh_daily.py 的執行 log，純執行紀錄非資料本體，會持續增長（有內建輪替但仍不必進 git）
+data/refresh.log

@@ -2,12 +2,54 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-17（第十一輪：`dashboard.html` 台股資金流向儀表板 v1
-  —— 本專案主產出物，完全獨立、免伺服器、瀏覽器雙擊即開的靜態儀表板，詳見下方
-  第十一輪紀錄）
+- 最後更新：Claude Code @ 2026-07-17（第十二輪：`refresh_daily.py` 每日刷新腳本
+  —— 把十一個 build/export 腳本串成嚴格串行的更新鏈，詳見下方第十二輪紀錄；排程本身
+  尚未註冊，需使用者授權後由主對話另行處理）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
+  - **【第十二輪】`refresh_daily.py` —— 每日刷新腳本**：把前十一輪累積的十一個
+    build/export 腳本（`build_institutional_summary.py` → `build_daily_prices.py` →
+    `build_taiex.py` → `build_revenue_history.py` → `build_fundamentals.py` →
+    `build_sector_flow.py` → `build_sector_flow_weekly.py` → `build_sector_flow_
+    value.py` → `build_group_flow.py` → `export_sector_flow_animation.py` →
+    `export_dashboard.py`）串成一支**嚴格串行**執行的每日刷新腳本（SQLite 單寫入者，
+    AGENTS.md 早已明訂「不可同時併發跑」，串行是唯一安全設計）。
+    - 每步用 `subprocess.run([sys.executable, script], cwd=repo根)` 執行，開始/結束/
+      耗時/成功失敗記錄到 `data/refresh.log`（append 模式；`rotate_log()` 在超過
+      5MB 時砍掉前半只保留後半，截斷點對齊到換行後，避免行被腰斬）。
+    - **單步失敗不中止**：記錄後繼續跑後續步驟（增量抓取類腳本失敗，隔天重跑會自動
+      續傳補上；彙總/匯出類腳本失敗，用當下既有資料照跑不影響其他步驟）。全部跑完後
+      若有任何失敗，透過 `C:\CLAUDE\tools\telegram\notify.py` 的 `send()` 發一則
+      失敗摘要通知——用法比照 `tw-momentum-scanner/notifier/telegram.py`（`sys.path`
+      加入 `C:\CLAUDE\tools\telegram` 後 `import notify`，讀 `notify.load_env()`
+      取 token/chat_id），**Telegram 發送失敗一律 try/except 吞掉，不可讓 refresh
+      當掉**。全部成功時安靜結束、不發通知（避免每日都收到「一切正常」的雜訊）。
+    - `--dry-run`：只列印 11 步清單，不執行、不寫 log、不呼叫 `subprocess.run`。
+    - exit code：全成功 = 0，有任何失敗 = 1（供排程系統/Windows Task Scheduler
+      判斷失敗狀態並可選擇性重試或告警）。
+    - **log 位置**：`data/refresh.log`（repo 內，已加進 `.gitignore`，理由：跟
+      `data/tw_stocks.db` 不同，log 是純執行紀錄非資料本體，且會持續增長，不需要
+      track 進 git）。
+    - **本輪任務範圍明確不含排程註冊**：使用者已明確指示「不要執行任何 schtasks
+      指令，排程註冊由主對話另行處理」，本輪只交付腳本本身；README.md 附上建議的
+      `schtasks` 範例指令（週一至五 18:30，比照 tw-momentum-scanner 排程時段慣例），
+      但**尚未實際執行**，等待使用者在主對話授權後另行註冊。
+    - `tests/test_refresh_daily.py`（11 個測試，**全程 mock `subprocess.run`，不真的
+      執行任何 build/export 腳本**）：dry-run 輸出包含全部 11 步且順序正確且與
+      `STEPS` 常數一致、dry-run 不觸碰 `subprocess.run`、`rotate_log()` 未超限不動作
+      /不存在不丟例外/超限時砍前半保留後半且截斷對齊換行/找不到換行時保底砍到
+      門檻內、單步失敗（mock 讓 `build_taiex.py` 回傳非 0）不中斷後續步驟且結尾正確
+      彙總通知、多步失敗全部列入摘要、`run_step()` 對 `subprocess.run` 拋例外的情況
+      也視為該步失敗（不中止整條鏈）、全部成功時不呼叫通知且 exit code 為 0、
+      `send_failure_notification()` 在 `import notify` 失敗時吞例外不外拋。全專案
+      `python -m pytest tests/ -q` 共 **145 個測試，全綠**（134 個既有 + 11 個新增）。
+    - `AGENTS.md`（build/run 新增 `refresh_daily.py` 說明段落＋架構圖新增一行）／
+      `README.md`（新增「每日更新」段落，含手動執行方式＋建議排程範例指令，範例寫出
+      但註明由主對話另行註冊）同步更新。
+    - **無偏離**：規格要求的行為（串行執行、log 輪替、單步失敗不中斷、結尾失敗摘要
+      通知、`--dry-run`、exit code、不含排程註冊）全數如實實作，未發現需要臨場調整
+      判斷的模糊點。
   - **【第十一輪】`dashboard.html`（repo 根目錄）—— 台股資金流向儀表板 v1，本專案主
     產出物**：新增 `export_dashboard.py`，唯讀彙整前十輪累積的資料表，匯出一份完全
     獨立、免伺服器、瀏覽器雙擊即開的靜態 HTML（比照 `export_sector_flow_animation.py`
@@ -445,15 +487,16 @@
      維度、沒有個股鑽取、沒有跟月營收/籌碼集中度串接；`export_sector_flow_
      animation.py` 目前只讀 `sector_flow_*`，若要做族群版動畫需要另外處理「族群重疊
      不能簡單取 top-N 加總」的呈現方式，尚未實作）。
-  4. **定期刷新排程**：`build_db.py` 與 `build_fundamentals.py`（籌碼集中度）仍是
-     整批快照覆蓋，可任意頻率重跑（籌碼集中度全市場實測仍是秒級完成）。
-     `build_revenue_history.py` 與 `build_institutional_summary.py` 都已改成增量式，
-     重跑成本低（前者最近 2 個月強制重抓 + 新月份自動涵蓋、後者只抓比本地最新日期
-     更新的新交易日），**建議排程每日跑一次**（比照 tw-momentum-scanner 用 Windows
-     排程或 cron），每日增量成本：月營收約數秒（除非剛好是新月份第一次公告當天才會
-     抓多一點）、三大法人約數十秒~1 分鐘（1~2 個新交易日 x 2 市場，全市場資料量比
-     91 檔版本大，但仍是同一組節流請求數，增量成本量級不變）。**第七輪的全市場歷史
-     backfill 已經做完，之後不需要再手動觸發長跑**，除非未來想拉長歷史視窗（改
+  4. **【第十二輪起，腳本已完成，只差排程註冊】定期刷新排程**：`refresh_daily.py`
+     已把十一個 build/export 腳本串成嚴格串行的每日刷新腳本（見上方第十二輪紀錄），
+     `build_revenue_history.py`／`build_institutional_summary.py` 都是增量式，重跑
+     成本低（前者最近 2 個月強制重抓 + 新月份自動涵蓋、後者只抓比本地最新日期更新的
+     新交易日），每日增量成本：月營收約數秒、三大法人約數十秒~1 分鐘（1~2 個新交易日
+     x 2 市場）、其餘板塊/族群彙總與匯出步驟純本地聚合皆秒級完成，整條鏈預期數分鐘
+     內跑完。**尚未執行的最後一步是排程註冊本身**——使用者已明確要求本輪不要跑
+     `schtasks`，需在主對話另行授權後註冊（README.md 已附建議指令，建議時段週一至
+     五 18:30，比照 tw-momentum-scanner 排程時段慣例）。第七輪的全市場歷史 backfill
+     已經做完，之後不需要再手動觸發長跑，除非未來想拉長歷史視窗（改
      `--target-trading-days`/`--months` 參數）。
 - 關鍵決策 + 為什麼：
   - **【第八輪後續】長條圖 x 軸固定、TAIEX 折線圖 y 軸刻意不固定，兩者邏輯相反**：

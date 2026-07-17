@@ -42,6 +42,29 @@ python -m pytest tests/ -q    # 驗證資料庫內容合理
 python export_dashboard.py    # 讀 data/tw_stocks.db -> 覆寫 dashboard.html
 ```
 
+## 每日更新
+
+**【第十二輪】** `refresh_daily.py` 把完整更新鏈（三大法人 → 收盤價 → TAIEX → 月營收 →
+籌碼集中度 → 板塊/族群彙總 → 動畫/儀表板匯出，共 11 步）串成一支腳本，依序嚴格串行執行
+（SQLite 單寫入者，不可併發跑）。單步失敗不中止，記錄後繼續跑後續步驟；全部跑完後若有
+任何失敗會透過 Telegram 發一則失敗摘要（全部成功則安靜結束、不通知）。
+
+手動執行：
+
+```bash
+python refresh_daily.py            # 依序跑完 11 步，記錄到 data/refresh.log
+python refresh_daily.py --dry-run  # 只列印步驟清單，不執行
+```
+
+排程註冊不在本腳本範圍內，需另行授權設定（建議週一至五 18:30，範例指令，實際註冊由
+主對話另行處理）：
+
+```bash
+schtasks /create /tn "tw-stock-db-refresh" /tr "python C:\CLAUDE\investing\tw-stock-db\refresh_daily.py" /sc weekly /d MON,TUE,WED,THU,FRI /st 18:30
+```
+
+詳見 [HANDOFF.md](HANDOFF.md) 第十二輪紀錄。
+
 ## 專案定位與慣例
 
 見 [AGENTS.md](AGENTS.md)。現況與下一步見 [HANDOFF.md](HANDOFF.md)。
