@@ -2,9 +2,10 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-17（第十二輪：`refresh_daily.py` 每日刷新腳本
-  —— 把十一個 build/export 腳本串成嚴格串行的更新鏈，詳見下方第十二輪紀錄；排程本身
-  尚未註冊，需使用者授權後由主對話另行處理）
+- 最後更新：Claude Code @ 2026-07-17（第十二輪追加：repo 已公開發布到 GitHub +
+  `refresh_daily.py` 新增第 12 步 `publish`，把 `dashboard.html`/`analysis/*.html`
+  的每日變更自動 commit + push 到公開 repo，詳見下方「【第十二輪追加】repo 公開發布 +
+  自動發布步驟」小節）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
@@ -56,6 +57,65 @@
     - **無偏離**：規格要求的行為（串行執行、log 輪替、單步失敗不中斷、結尾失敗摘要
       通知、`--dry-run`、exit code、不含排程註冊）全數如實實作，未發現需要臨場調整
       判斷的模糊點。
+  - **【第十二輪追加，2026-07-17】repo 公開發布 + `refresh_daily.py` 新增第 12 步
+    `publish`（每日刷新鏈自動發布）**：
+    - **repo 已公開發布**：GitHub repo
+      [jiawei0601/tw-stock-db](https://github.com/jiawei0601/tw-stock-db)，
+      GitHub Pages 已上線 <https://jiawei0601.github.io/tw-stock-db/>（讀
+      `index.html` + `dashboard.html`，皆為靜態檔案，push 即更新）。發布日
+      2026-07-17。**發布前已用 `git filter-repo` 從全部歷史移除
+      `data/tw_stocks.db`**（DB 隨全市場 3 年資料成長到 ~240MB，超過 GitHub 單檔
+      100MB 上限、且讓 `.git` 膨脹到 306MB，見上方第八輪紀錄段落「`data/tw_stocks.db`
+      track 進 git」條目的 2026-07-17 反轉紀錄），本機保留完整 mirror 備份
+      `../tw-stock-db-backup.git`（在本 repo 上一層目錄，未 push 到任何遠端，供未來
+      需要找回 DB 完整 commit 歷史時使用）。
+    - **`refresh_daily.py` 新增第 12 步 `publish`**（在既有 11 步 build/export 鏈
+      之後）：`git add` **只加入白名單** `dashboard.html` 與 `analysis/*.html`
+      （絕不 `git add -A`）→ `git diff --cached --quiet` 判斷無變更就跳過（log 記
+      「無變更，跳過發布」，視為成功）→ 有變更則 `git commit -m "每日自動更新
+      YYYY-MM-DD"` → `git push origin master`。push 失敗（例如斷網）比照其他 11 步：
+      記 log、計入失敗摘要、**不中止**（隔天成功的 push 會自然涵蓋今天累積的變更，
+      因為 `dashboard.html`/`analysis/*.html` 是覆蓋式匯出，不是增量檔案）。新增
+      `--no-publish` 參數可跳過第 12 步（本機測試/演練用，不影響前 11 步）；
+      `--dry-run` 步驟清單同步變成 12 步。
+    - **排程沿用既有 `TwStockDbDaily`（週一至五 18:30），不需要另外註冊**——publish
+      是 `refresh_daily.py` 內部新增的一步，排程呼叫的仍是同一支腳本，自動涵蓋新步驟。
+      這代表 README「每個交易日傍晚更新」的承諾，從本輪起才是「資料庫更新」與「公開
+      Pages 頁面更新」兩者皆自動化，先前只有前者。
+    - **⚠️ 公開化紀律（重要，寫給未來任何 agent，不論 Claude Code 或 Antigravity）**：
+      本 repo 自 2026-07-17 起是**公開 repo**，push 即代表內容直接上線到公開 GitHub
+      Pages。**絕對不可以把以下任何一種東西 commit 進來**：
+      1. `data/*.db`（含 `data/tw_stocks.db`）—— `.gitignore` 已排除，重建方式見
+         `.gitignore` 內註解與 README「每日更新」段落；
+      2. 任何金鑰／token／密碼（例如 Telegram bot token、任何 API key）——本專案目前
+         不需要在 repo 內存放任何密鑰，`refresh_daily.py` 的 Telegram 通知靠讀取
+         `C:\CLAUDE\tools\telegram` 目錄下的設定，該目錄本身不在這個 repo 裡；
+      3. 非官方公開來源、或使用者未明確同意公開的任何資料檔案。
+      `refresh_daily.py` 的 `publish` 步驟**刻意只 `git add` 白名單路徑**（`dashboard.
+      html`、`analysis/*.html`），不用 `git add -A`，正是為了在自動化流程裡從架構上
+      杜絕「未來哪個腳本不小心多寫出一個檔案、被自動 commit 推上公開 repo」的風險——
+      即使之後有人在 repo 裡新增了不該公開的檔案，只要沒被明確加進這個白名單，
+      `publish` 步驟就不會把它推上線。日後如果要擴大 publish 的白名單（例如未來新增
+      別的匯出物），務必逐一明確列出路徑，不要圖方便改回 `-A`。
+    - `tests/test_refresh_daily.py` 新增 5 個測試（連同既有 11 個共 16 個，全程 mock
+      `subprocess.run`，不真的碰 git）：dry-run 12 步清單且 `publish` 為最後一步、
+      publish 無變更時只呼叫 `add`+`diff` 不呼叫 `commit`/`push` 且 `git add` 參數
+      確實是白名單兩項（不含 `-A`）、有變更時依序 `add`→`diff`→`commit`（commit
+      message 含「每日自動更新」+ 今日日期）→`push origin master`、push 失敗時
+      `run_publish_step()` 回傳失敗但不拋例外、透過 `main()` 驗證 push 失敗會計入
+      `failed_steps`＋觸發 Telegram 摘要通知＋exit code 反映失敗、`--no-publish` 會
+      跳過整個 publish（log 只留 `SKIP publish`，不留 `START publish`/`END publish`）。
+      既有 3 個「單步失敗不中斷」系列測試同步更新：`_fake_run_factory` 現在同時處理
+      build 腳本呼叫（`[sys.executable, script]`）與 git 呼叫（`cmd[0] == "git"`），
+      git 分支預設全部回傳成功／無變更（`diff --cached --quiet` 回 0），確保這些原本
+      只測 build 腳本鏈的測試不會被新增的 publish 步驟意外弄假。全專案
+      `python -m pytest tests/ -q` 共 **150 個測試，全綠**（145 個既有 + 5 個淨增）。
+    - `AGENTS.md`（build/run 的 `refresh_daily.py` 段落改寫為 12 步 + publish 行為
+      說明＋架構圖同步更新）同步更新；`README.md`「每日更新」段落也更新為 12 步並
+      說明 Pages 內容會隨每日排程自動更新。
+    - **無偏離**：規格要求的白名單限制、無變更跳過、push 失敗不中止、`--no-publish`、
+      dry-run 12 步全數如實實作；commit message 格式（`每日自動更新 YYYY-MM-DD`）與
+      規格文字逐字一致。
   - **【第十一輪】`dashboard.html`（repo 根目錄）—— 台股資金流向儀表板 v1，本專案主
     產出物**：新增 `export_dashboard.py`，唯讀彙整前十輪累積的資料表，匯出一份完全
     獨立、免伺服器、瀏覽器雙擊即開的靜態 HTML（比照 `export_sector_flow_animation.py`
@@ -493,16 +553,18 @@
      維度、沒有個股鑽取、沒有跟月營收/籌碼集中度串接；`export_sector_flow_
      animation.py` 目前只讀 `sector_flow_*`，若要做族群版動畫需要另外處理「族群重疊
      不能簡單取 top-N 加總」的呈現方式，尚未實作）。
-  4. **【已全部完成，含排程註冊】定期刷新排程**：`refresh_daily.py`
-     已把十一個 build/export 腳本串成嚴格串行的每日刷新腳本（見上方第十二輪紀錄），
+  4. **【已全部完成，含排程註冊 + 自動發布】定期刷新排程**：`refresh_daily.py`
+     已把十一個 build/export 腳本 + 第 12 步 `publish` 串成嚴格串行的每日刷新腳本
+     （見上方第十二輪紀錄與第十二輪追加紀錄），
      `build_revenue_history.py`／`build_institutional_summary.py` 都是增量式，重跑
      成本低（前者最近 2 個月強制重抓 + 新月份自動涵蓋、後者只抓比本地最新日期更新的
      新交易日），每日增量成本：月營收約數秒、三大法人約數十秒~1 分鐘（1~2 個新交易日
-     x 2 市場）、其餘板塊/族群彙總與匯出步驟純本地聚合皆秒級完成，整條鏈預期數分鐘
-     內跑完。**排程 `TwStockDbDaily` 已於 2026-07-17 經使用者明確授權後由主對話註冊
-     完成**（週一至五 18:30，細節與直譯器依賴警告見上方第十二輪紀錄）。第七輪的全市場歷史 backfill
-     已經做完，之後不需要再手動觸發長跑，除非未來想拉長歷史視窗（改
-     `--target-trading-days`/`--months` 參數）。
+     x 2 市場）、其餘板塊/族群彙總與匯出步驟純本地聚合皆秒級完成，publish 步驟秒級
+     完成，整條鏈預期數分鐘內跑完。**排程 `TwStockDbDaily` 已於 2026-07-17 經使用者
+     明確授權後由主對話註冊完成**（週一至五 18:30，細節與直譯器依賴警告見上方第十二輪
+     紀錄），**第十二輪追加的 publish 步驟隨這個既有排程自動生效，不需要另外註冊**。
+     第七輪的全市場歷史 backfill 已經做完，之後不需要再手動觸發長跑，除非未來想拉長
+     歷史視窗（改 `--target-trading-days`/`--months` 參數）。
 - 關鍵決策 + 為什麼：
   - **【第八輪後續】長條圖 x 軸固定、TAIEX 折線圖 y 軸刻意不固定，兩者邏輯相反**：
     長條圖的 0 軸是「淨流入/淨流出的方向錨點」，每週亂跳會讓人以為板塊變了方向；

@@ -4,18 +4,26 @@
     build_institutional_summary.py -> build_daily_prices.py -> build_taiex.py
     -> build_revenue_history.py -> build_fundamentals.py -> build_sector_flow.py
     -> build_sector_flow_weekly.py -> build_sector_flow_value.py -> build_group_flow.py
-    -> export_sector_flow_animation.py -> export_dashboard.py
+    -> export_sector_flow_animation.py -> export_dashboard.py -> publish（第 12 步）
 
 每一步用 `subprocess.run([sys.executable, script], cwd=repo根)` 執行，開始/結束/耗時/
 成功失敗記錄到 `data/refresh.log`（append；超過 5MB 會砍掉前半只保留後半）。
 
+**第 12 步 publish（【本輪新增】把匯出物發布到公開 GitHub repo）**：`git add` 只加入
+白名單路徑 `dashboard.html` 與 `analysis/*.html`（**絕不 `git add -A`**，防止任何意外
+檔案被自動推上公開 repo，見 AGENTS.md 公開化紀律）；`git diff --cached --quiet` 判斷
+無變更就跳過（記 log「無變更，跳過發布」）；有變更則 `git commit -m "每日自動更新
+YYYY-MM-DD"` 後 `git push origin master`。`--no-publish` 可跳過本步（本機測試用）。
+
 **單步失敗不中止**：記錄後繼續跑後續步驟（增量抓取失敗明天會自動補上，彙總/匯出用現有
-資料跑完即可）。全部跑完後若有任何失敗，透過 `C:\\CLAUDE\\tools\\telegram\\notify.py`
+資料跑完即可；publish push 失敗同理——比照其他步驟記 log、計入失敗、不中止，隔天成功的
+push 會涵蓋今天的變更）。全部跑完後若有任何失敗，透過 `C:\\CLAUDE\\tools\\telegram\\notify.py`
 的 `send()` 發一則失敗摘要通知（比照 tw-momentum-scanner 的 notifier/telegram.py 用法：
 sys.path 加入該目錄後 import）；Telegram 發送失敗一律吞掉、不可讓 refresh 當掉。全部成功
 時安靜結束、不發通知。
 
-`--dry-run`：只列印步驟清單，不執行、不寫 log。
+`--dry-run`：只列印步驟清單（共 12 步），不執行、不寫 log。
+`--no-publish`：跳過第 12 步 publish（本機測試/演練用，不影響前 11 步）。
 
 Exit code：全部成功 = 0；有任何步驟失敗 = 1（供排程系統判斷失敗狀態）。
 排程註冊本身不在本腳本範圍內，見 HANDOFF.md 第十二輪紀錄（建議週一至五 18:30）。
@@ -46,7 +54,11 @@ STEPS = [
     "build_group_flow.py",
     "export_sector_flow_animation.py",
     "export_dashboard.py",
+    "publish",
 ]
+
+# publish 步驟只允許 add 這個白名單（絕不 git add -A）
+PUBLISH_ADD_PATHS = ["dashboard.html", "analysis/*.html"]
 
 
 def rotate_log(path: Path, max_bytes: int = LOG_MAX_BYTES) -> None:
@@ -109,6 +121,67 @@ def run_step(script: str, repo_root: Path = REPO_ROOT) -> tuple[bool, float]:
     return success, elapsed
 
 
+def run_publish_step(repo_root: Path = REPO_ROOT) -> tuple[bool, float]:
+    """第 12 步：把匯出物（dashboard.html + analysis/*.html）發布到公開 GitHub repo。
+
+    只 `git add` 白名單路徑（絕不 `git add -A`），無變更就跳過（視為成功、不計入失敗），
+    有變更則 commit + push origin master。push 失敗（斷網等）比照其他步驟：記 log、
+    回傳失敗、不拋例外（呼叫端不中止整條鏈，隔天成功的 push 會涵蓋今天的變更）。
+    """
+    start = time.monotonic()
+    _log(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] START publish")
+
+    success = True
+    try:
+        add_result = subprocess.run(
+            ["git", "add", *PUBLISH_ADD_PATHS],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+        )
+        if add_result.returncode != 0:
+            success = False
+            _log(f"  git add 失敗: {(add_result.stderr or '').strip()}")
+        else:
+            diff_result = subprocess.run(
+                ["git", "diff", "--cached", "--quiet"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+            )
+            if diff_result.returncode == 0:
+                _log("  無變更，跳過發布")
+            else:
+                commit_msg = f"每日自動更新 {datetime.now():%Y-%m-%d}"
+                commit_result = subprocess.run(
+                    ["git", "commit", "-m", commit_msg],
+                    cwd=str(repo_root),
+                    capture_output=True,
+                    text=True,
+                )
+                if commit_result.returncode != 0:
+                    success = False
+                    _log(f"  git commit 失敗: {(commit_result.stderr or '').strip()}")
+                else:
+                    push_result = subprocess.run(
+                        ["git", "push", "origin", "master"],
+                        cwd=str(repo_root),
+                        capture_output=True,
+                        text=True,
+                    )
+                    if push_result.returncode != 0:
+                        success = False
+                        _log(f"  git push 失敗: {(push_result.stderr or '').strip()}")
+    except Exception as e:  # noqa: BLE001 - 單步任何例外都不可中止整條刷新鏈
+        success = False
+        _log(f"  EXCEPTION: {e}")
+
+    elapsed = time.monotonic() - start
+    status = "OK" if success else "FAIL"
+    _log(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] END publish status={status} elapsed={elapsed:.1f}s")
+    return success, elapsed
+
+
 def send_failure_notification(failed_steps: list[str]) -> None:
     """失敗摘要透過 Telegram 通知。任何例外一律吞掉，通知失敗不可讓 refresh 當掉。"""
     try:
@@ -134,6 +207,9 @@ def send_failure_notification(failed_steps: list[str]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="tw-stock-db 每日刷新腳本（依序執行完整更新鏈）")
     parser.add_argument("--dry-run", action="store_true", help="只列印步驟清單，不執行")
+    parser.add_argument(
+        "--no-publish", action="store_true", help="跳過第 12 步 publish（本機測試用）"
+    )
     args = parser.parse_args(argv)
 
     if args.dry_run:
@@ -147,7 +223,13 @@ def main(argv: list[str] | None = None) -> int:
 
     failed_steps: list[str] = []
     for step in STEPS:
-        success, _elapsed = run_step(step)
+        if step == "publish":
+            if args.no_publish:
+                _log(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] SKIP publish (--no-publish)")
+                continue
+            success, _elapsed = run_publish_step()
+        else:
+            success, _elapsed = run_step(step)
         if not success:
             failed_steps.append(step)
 

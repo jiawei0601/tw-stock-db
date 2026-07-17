@@ -61,16 +61,20 @@ python export_dashboard.py    # 讀 data/tw_stocks.db -> 覆寫 dashboard.html
 
 ## 每日更新
 
-**【第十二輪】** `refresh_daily.py` 把完整更新鏈（三大法人 → 收盤價 → TAIEX → 月營收 →
-籌碼集中度 → 板塊/族群彙總 → 動畫/儀表板匯出，共 11 步）串成一支腳本，依序嚴格串行執行
+**【第十二輪，第 12 步 publish 為後續追加】** `refresh_daily.py` 把完整更新鏈（三大
+法人 → 收盤價 → TAIEX → 月營收 → 籌碼集中度 → 板塊/族群彙總 → 動畫/儀表板匯出，共
+11 步 → **第 12 步 publish：把 `dashboard.html`/`analysis/*.html` 的變更自動 commit +
+push 到這個公開 repo，讓 GitHub Pages 內容跟著更新**）串成一支腳本，依序嚴格串行執行
 （SQLite 單寫入者，不可併發跑）。單步失敗不中止，記錄後繼續跑後續步驟；全部跑完後若有
-任何失敗會透過 Telegram 發一則失敗摘要（全部成功則安靜結束、不通知）。
+任何失敗會透過 Telegram 發一則失敗摘要（全部成功則安靜結束、不通知）。publish 步驟只
+`git add` 白名單路徑（絕不 `git add -A`），無變更就安靜跳過。
 
 手動執行：
 
 ```bash
-python refresh_daily.py            # 依序跑完 11 步，記錄到 data/refresh.log
-python refresh_daily.py --dry-run  # 只列印步驟清單，不執行
+python refresh_daily.py                # 依序跑完 12 步，記錄到 data/refresh.log
+python refresh_daily.py --dry-run      # 只列印步驟清單，不執行
+python refresh_daily.py --no-publish   # 前 11 步照跑，跳過第 12 步 publish（本機測試用）
 ```
 
 本機排程 `TwStockDbDaily`（週一至五 18:30）已註冊，細節與直譯器依賴警告見
