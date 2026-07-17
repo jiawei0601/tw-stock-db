@@ -31,10 +31,16 @@
     - **log 位置**：`data/refresh.log`（repo 內，已加進 `.gitignore`，理由：跟
       `data/tw_stocks.db` 不同，log 是純執行紀錄非資料本體，且會持續增長，不需要
       track 進 git）。
-    - **本輪任務範圍明確不含排程註冊**：使用者已明確指示「不要執行任何 schtasks
-      指令，排程註冊由主對話另行處理」，本輪只交付腳本本身；README.md 附上建議的
-      `schtasks` 範例指令（週一至五 18:30，比照 tw-momentum-scanner 排程時段慣例），
-      但**尚未實際執行**，等待使用者在主對話授權後另行註冊。
+    - **排程註冊已完成（2026-07-17，使用者明確授權後由主對話執行）**：Windows 排程
+      工作 `TwStockDbDaily`，週一至五 18:30 執行 `refresh_daily.py`，工作目錄 repo 根，
+      stdout/stderr 追加到 `data/refresh_task.log`（捕捉 python 啟動前的早期錯誤，
+      與腳本自己寫的 `data/refresh.log` 分工）。停用方式：
+      `schtasks /delete /tn TwStockDbDaily /f`。
+      **⚠️ 直譯器依賴**：排程指向 `C:\Users\chang\AppData\Local\hermes\hermes-agent\
+      venv\Scripts\python.exe`（hermes 專案的 venv）——這是本專案從第一輪起實際使用、
+      已驗證裝有全部依賴（requests/pytest）的直譯器，但它屬於另一個專案。**若日後
+      重建或移除 hermes venv，這個排程會無聲失效**（python 都起不來，連 Telegram
+      失敗通知都發不出），屆時需改指向其他裝有 requests 的直譯器並更新排程。
     - `tests/test_refresh_daily.py`（11 個測試，**全程 mock `subprocess.run`，不真的
       執行任何 build/export 腳本**）：dry-run 輸出包含全部 11 步且順序正確且與
       `STEPS` 常數一致、dry-run 不觸碰 `subprocess.run`、`rotate_log()` 未超限不動作
@@ -487,15 +493,14 @@
      維度、沒有個股鑽取、沒有跟月營收/籌碼集中度串接；`export_sector_flow_
      animation.py` 目前只讀 `sector_flow_*`，若要做族群版動畫需要另外處理「族群重疊
      不能簡單取 top-N 加總」的呈現方式，尚未實作）。
-  4. **【第十二輪起，腳本已完成，只差排程註冊】定期刷新排程**：`refresh_daily.py`
+  4. **【已全部完成，含排程註冊】定期刷新排程**：`refresh_daily.py`
      已把十一個 build/export 腳本串成嚴格串行的每日刷新腳本（見上方第十二輪紀錄），
      `build_revenue_history.py`／`build_institutional_summary.py` 都是增量式，重跑
      成本低（前者最近 2 個月強制重抓 + 新月份自動涵蓋、後者只抓比本地最新日期更新的
      新交易日），每日增量成本：月營收約數秒、三大法人約數十秒~1 分鐘（1~2 個新交易日
      x 2 市場）、其餘板塊/族群彙總與匯出步驟純本地聚合皆秒級完成，整條鏈預期數分鐘
-     內跑完。**尚未執行的最後一步是排程註冊本身**——使用者已明確要求本輪不要跑
-     `schtasks`，需在主對話另行授權後註冊（README.md 已附建議指令，建議時段週一至
-     五 18:30，比照 tw-momentum-scanner 排程時段慣例）。第七輪的全市場歷史 backfill
+     內跑完。**排程 `TwStockDbDaily` 已於 2026-07-17 經使用者明確授權後由主對話註冊
+     完成**（週一至五 18:30，細節與直譯器依賴警告見上方第十二輪紀錄）。第七輪的全市場歷史 backfill
      已經做完，之後不需要再手動觸發長跑，除非未來想拉長歷史視窗（改
      `--target-trading-days`/`--months` 參數）。
 - 關鍵決策 + 為什麼：
