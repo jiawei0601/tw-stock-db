@@ -937,3 +937,10 @@
   `build_institutional_summary.py` 已有資料，`build_group_flow.py` 依賴
   `build_institutional_summary.py`／`build_daily_prices.py`／`build_sector_flow.py`
   都已跑過。
+
+## 排程可靠性修補（2026-07-23，Claude Code）
+
+- **事件**：`TwStockDbDaily`（平日 18:30）自 7/17 建立以來從未成功執行——該時段本機常未開機/未登入，開機補跑又被系統拒絕（0x800710E0）且無 log，資料靜默停在 7/16。7/23 手動跑 `refresh_daily.py` 補齊（12 步全 OK，資料與儀表板已更新到 7/23）。
+- **修法**：排程改雙觸發器＝平日 18:30 ＋ **登入後延遲 30 分鐘補跑**（MultipleInstances=IgnoreNew 防併發；腳本本身增量冪等，重複跑無害、無變更時 publish 自動跳過）。
+- 同日起動作改經 `C:\CLAUDE\tools\run-hidden.vbs` 隱藏視窗執行（全機排程統一作法），原始命令對照表在 `C:\CLAUDE\tools\hide-scheduled-tasks.ps1`。
+- **驗證方式**：看 `data/refresh.log` 是否有當日「共 12 步，失敗 0 步」；DB 口徑抽查 `SELECT MAX(date) FROM daily_prices`。
