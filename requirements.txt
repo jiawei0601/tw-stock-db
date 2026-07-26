@@ -1,2 +1,6 @@
+# certifi 本來就是 requests 的依賴，這裡明確列出是因為 collectors/macro_tw.py 直接
+# import certifi 組裝自訂 CA bundle（ws.dgbas.gov.tw 憑證鏈不完整的補救，見該檔案頭
+# 說明），不是新增獨立依賴。
 requests>=2.31
 pytest>=7.0
+certifi>=2024.0

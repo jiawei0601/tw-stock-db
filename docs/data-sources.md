@@ -566,3 +566,87 @@ TPEx 的「歷史個股收盤價」比 TWSE 曲折，排查過程記錄如下（
   `www/zh-tw/afterTrading/dailyQuotes` 這個「查一天、回全市場」的端點後，TPEx 跟
   TWSE 一樣可以用逐日 backfill 涵蓋，不需要退回 st44 方案，也不需要在文件裡記錄
   「TPEx 部分留白」的限制（實測涵蓋率見 HANDOFF.md 第九輪紀錄）。
+
+## 22. 【總經指標】美國+台灣共約 38 個總經/市場序列（2026-07-26 實測，`build_macro.py`）
+
+**美國序列（19 個）：FRED CSV endpoint（免 API key）**
+- URL：`https://fred.stlouisfed.org/graph/fredgraph.csv?id=<SERIES_ID>`，第一欄
+  `observation_date` 已是 ISO 格式，月頻/季頻序列的日期已對齊當月/當季第一天，不需
+  自行對齊；缺值以 `.` 表示，`collectors/macro_us.py::fetch_fred_series` 直接跳過。
+- 19 個序列全數實測可用：`NASDAQCOM`／`DGS10`／`DGS2`／`DTB3`／`T10Y2Y`／`GDPC1`／
+  `A191RL1Q225SBEA`／`CPIAUCSL`／`CPILFESL`／`CPIAUCNS`／`PCEPILFE`／`UNRATE`／
+  `PAYEMS`／`DFF`／`DFEDTARU`／`RSAFS`／`RSMVPD`／`CES0500000003`／`RRPONTSYD`。
+- **本輪任務執行期間 FRED（經 Akamai CDN）從本機網路環境持續性 read timeout**
+  （非偶發：直接用 `curl -v` 也重現，連線建立成功、request 送出，但
+  `schannel: remote party requests renegotiation` 後掛住直到 15-20s timeout；改用
+  Python `requests` 直接測試同樣 `ReadTimeout`，排除是 `collectors/_http.py` 本身的
+  bug）。**這是外部網路狀況，不是程式邏輯錯誤**——`_http.py` 的退避重試（5/20/60 秒
+  x 3 次）在此條件下會讓每個失敗序列耗時約 165 秒，19 個序列全部失敗的最壞情境下
+  US 階段會需要近 1 小時，`build_macro.py` 的「單一序列失敗不中斷整體」設計在這種
+  情境下正確運作（沒有真的卡死，只是退避耗時很長），之後改天重跑通常會恢復正常
+  （FRED 平時回應速度是次秒等級，見任務初期驗證紀錄）。
+
+**S&P 500：Yahoo Finance chart API（非官方，取代原規劃的 Stooq）**
+- 原規劃來源 `https://stooq.com/q/d/l/?s=^spx&i=d` **已加上瀏覽器 JavaScript
+  proof-of-work 驗證**（回應是「This site requires JavaScript to verify your
+  browser」的挑戰頁，內嵌一段要求執行 SHA-256 proof-of-work 並回呼 `/__verify` 才能
+  過關的 JS，即使帶瀏覽器 UA 仍會被攔——這是 bot-detection 機制，本專案安全規範不解
+  CAPTCHA/bot-detection 挑戰，故不採用，即使技術上可行）。
+- 改用 `https://query1.finance.yahoo.com/v8/finance/chart/^GSPC`（`query1.finance.
+  yahoo.com` chart API，是 `yfinance` 套件底層資料來源，公開唯讀 JSON endpoint，
+  非官方但廣泛使用，不涉及登入/驗證/bot-detection 繞過）。**關鍵陷阱**：只帶
+  `range=max&interval=1d` 會被 Yahoo 靜默降頻成季線（實測只回 168 筆 3mo 級距資料，
+  對應 `meta.dataGranularity="3mo"`），必須明確帶 `period1=0&period2=<未來時間戳>`
+  才能拿到真正的日線全歷史（實測 14261 筆，1970-01-02 ~ 至今）。**S&P 500 只能回溯到
+  1970 年**（Yahoo `^GSPC` 本身的歷史範圍限制），比 Stooq 理論上能提供的 1920 年代
+  更短，已誠實記錄在驗收結果，不臆測補齊更早期資料。
+
+**台灣序列：FinMind 優先 + 官方部會來源（FinMind 沒有對應資料集時使用）**
+- **FinMind 覆蓋範圍已逐一實測確認**（`https://api.finmindtrade.com/api/v4/data`，
+  token 讀 repo 根 `.env` 的 `FINMIND_TOKEN`，已 gitignore）：candidate dataset 名稱
+  逐一嘗試，只有 `TaiwanStockPrice`（`data_id=TAIEX`，回溯至 1999-01-05）與
+  `TaiwanExchangeRate`（`data_id=USD`，回溯至 2006-01-02，用 `spot_buy`/`spot_sell`
+  中價、查無即期報價時退回 `cash_buy`/`cash_sell` 中價）這兩個資料集有對應資料；
+  `CurrencyCirculation`（FinMind 官方文件列出的僅 2 個總經資料集之一）是「通貨發行
+  量」不是 M1B/M2 貨幣總計數年增率，且 `data_id="Taiwan"` 實測回空，用不上；
+  `TaiwanExportOrder`／`TaiwanTradeStatistics`／`TaiwanCPI`／`TaiwanPMI`／
+  `TaiwanMoneyAggregates`／`TaiwanBusinessCycleIndicator` 等候選名稱全部 422
+  Unprocessable Entity（資料集不存在，非參數錯誤）。**結論：出口值/外銷訂單/CPI/
+  核心CPI/M1B年增率/M2年增率/景氣對策信號/領先落後指標/PMI 這 9 類序列 FinMind
+  完全沒有涵蓋**，直接用官方來源，非「FinMind 失敗後 fallback」。
+- **出口值/電子零組件/資通與視聽產品出口值**：財政部統計處「出口值_按主要貨品分」
+  （`web02.mof.gov.tw/njswww/webMain.aspx?...&funid=i8121&...`，CSV 含 BOM，UTF-8，
+  月頻列格式「115年 6月」，年度加總列格式「115年」〔無空格月份，需跳過避免污染
+  月頻時序表〕，欄位「按美元計算(百萬美元)/ 總計」／「(1)電子零組件」／
+  「(4)資通與視聽產品」，回溯至民國90年=2001-01）。
+- **外銷訂單金額**：經濟部「外銷訂單」opendata（`service.moea.gov.tw/EE520/
+  opendata/b.csv`，CSV 含 BOM，UTF-8，資料期格式「07301」= 民國073年01月，欄位
+  「統計值(美元)」單位百萬美元，回溯至民國73年=1984-01）。
+- **CPI/核心CPI(年增率)**：主計總處消費者物價「基本分類指數」/「特殊分類指數」
+  XML（`ws.dgbas.gov.tw/001/Upload/.../pr0101a1m.xml` / `pr0103a1m.xml`，格式
+  `Item`/`TIME_PERIOD`/`FREQ`/`TYPE`/`Item_VALUE`，`TYPE="年增率(%)"` 的列是官方
+  已計算好的年增率，直接採用不重複計算；核心CPI的 `Item` 精確字串是「總指數(不含
+  蔬果及能源)【即核心物價】(指數基期：民國110年=100)」，跟「不含食物」「不含蔬菜
+  水果」等其他特殊分類容易混淆，需精確比對；回溯至1981年）。
+- **M1B/M2(日平均,年增率)**：**注意陷阱**——`data.gov.tw` 上名稱含「M1B變動因素
+  分析」/「M2變動因素分析」的資料集（dataset 10755/10756，`EF19M01.csv`/
+  `EF21M01.csv`）是「M1B/M2**變動量**的因素分解」（國外資產淨額變動、對政府債權
+  變動等），不是「M1B/M2 本身水準的年增率」，年增率欄位在變動量很小時會出現
+  單月 1000%+ 的離譜數字，**不能誤用**。正確資料集是「貨幣總計數」（dataset 6024，
+  `EF15M01.csv` = 日平均數月資料），欄位「貨幣總計數 -Ｍ１Ｂ-年增率」/「貨幣總計數
+  -Ｍ２-年增率」才是官方已計算好、正常量級的年增率，回溯至1987年。
+- **景氣對策信號分數/領先指標/落後指標**：國發會「景氣指標及燈號」ZIP
+  （`ws.ndc.gov.tw/Download.ashx?...`）。**編碼陷阱**：ZIP 內檔名是 Big5 編碼但
+  Python `zipfile` 預設用 cp437 解碼內部檔名（ZIP 格式沒有標記 UTF-8 flag），必須
+  先 `name.encode('cp437').decode('big5')` 還原才能比對到正確中文檔名（目標檔案
+  `景氣指標與燈號.csv`）；檔案內容本身是 UTF-8 BOM CSV，不受檔名編碼影響。欄位
+  `Date`／`領先指標綜合指數`／`落後指標綜合指數`／`景氣對策信號綜合分數`，早期月份
+  信號分數為 `-`（燈號制度尚未涵蓋）需跳過，回溯至1982年。
+- **PMI**：國發會「臺灣採購經理人指數」CSV（`ws.ndc.gov.tw/Download.ashx?...`），
+  欄位僅 `Date`/`PMI`/`NMI`（製造業/非製造業綜合指數），回溯至2012-07。**PMI 分項
+  指數（新增訂單/客戶存貨）沒有找到可用的免費來源**——疑似來源
+  `https://index.ndc.gov.tw/n/zh_tw/data/PMI` 頁面本身可正常載入，但其子資源
+  （`/n/include/js/app/PMI_total.min.js`）掛在 Cloudflare 之後，實測請求回傳
+  Cloudflare 攔截頁（「Sorry, you have been blocked」，`cf-error-details`），這是
+  bot-detection 機制，本專案安全規範不解 CAPTCHA/bot-detection 挑戰，故這兩個序列
+  直接跳過、不臆測資料（`build_macro.py` 執行摘要會誠實列在失敗清單）。

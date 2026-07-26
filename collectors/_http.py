@@ -47,11 +47,17 @@ def get(
     throttle_bucket: str | None = None,
     min_interval: float = MIN_INTERVAL_SEC,
     encoding: str | None = None,
+    verify: bool | str = True,
 ) -> requests.Response:
     """統一 GET 入口：節流 + 重試 + 錯誤轉譯為 CollectorError。
 
     encoding：若來源回應的 Content-Type 宣告編碼不準確（例如 ISIN 頁面宣告 MS950 但
     requests 有時猜錯），呼叫端可強制指定（例如 'big5'）。
+    verify：預設 True（正常憑證驗證）。少數來源伺服器本身憑證鏈不完整（只送 leaf
+    憑證、缺中繼 CA，例如主計總處 ws.dgbas.gov.tw，見 collectors/macro_tw.py），
+    呼叫端可傳入「certifi 預設信任庫 + 缺的中繼 CA」合併後的自訂 CA bundle 檔案路徑，
+    而不是整個關掉驗證（`verify=False`）——這樣仍然驗證到根 CA，只是補齊伺服器自己
+    漏送的中繼憑證。
     """
     bucket = throttle_bucket or source
     req_headers = {"User-Agent": BROWSER_UA}
@@ -64,7 +70,7 @@ def get(
     for attempt in range(len(RETRY_BACKOFF_SEC) + 1):
         _throttle(bucket, min_interval)
         try:
-            resp = _session.get(url, params=params, headers=req_headers, timeout=timeout)
+            resp = _session.get(url, params=params, headers=req_headers, timeout=timeout, verify=verify)
         except (requests.Timeout, requests.ConnectionError) as e:
             # ConnectionError 涵蓋 DNS 解析失敗/連線被拒/連線中斷等暫時性網路問題
             # （長迴圈逐日打 API 時實測會偶發 getaddrinfo failed，視同 timeout 可退避重試）。

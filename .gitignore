@@ -14,3 +14,6 @@ data/*.db
 # refresh log（腳本自寫 + 排程 stdout 捕捉），純執行紀錄非資料本體
 data/refresh.log
 data/refresh_task.log
+
+# API 金鑰（勿 commit）
+.env

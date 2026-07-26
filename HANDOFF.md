@@ -2,11 +2,30 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-17（第十四輪：`dashboard.html` 六大區塊全部
-  改成可收折，詳見下方「【第十四輪】六大區塊可收折」小節）
+- 最後更新：Claude Code @ 2026-07-26（第十五輪：新增總經指標庫 `macro_series`/
+  `macro_observations`，美台共 39 序列 15 萬筆，詳見下方「【第十五輪】總經指標庫」小節）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
+  - **【第十五輪】總經指標庫（macro_series + macro_observations）**：使用者原想從
+    MacroMicro 下載美/台熱門總經數據，但下載功能要企業訂閱（TWD 20萬/年），改用免費
+    來源自建等價資料庫。新增 `build_macro.py`＋`collectors/macro_us.py`（FRED 免金鑰
+    CSV + Yahoo chart API）＋`collectors/macro_tw.py`（FinMind 優先＋財政部/經濟部/
+    主計總處/央行/國發會官方備援）＋`tests/test_macro.py`（11 測試，不打網路）。
+    實際入庫 **39 序列、150,084 筆**：美國 20（S&P500/NASDAQ/殖利率3天期+利差/GDP兩口徑/
+    CPI三口徑/核心PCE/失業率/非農/Fed利率兩口徑/零售兩口徑/時薪/ON RRP）＋台灣 19
+    （加權指數/美元台幣/出口值三分項含YoY/外銷訂單/CPI+核心CPI/M1B/M2/剪刀差/景氣
+    燈號分數/領先落後指標/製造業PMI）。已知缺口（誠實記錄）：PMI 分項新增訂單/客戶
+    存貨（唯一免費來源在 Cloudflare bot 驗證後，不解）；S&P500 僅回溯至 1970
+    （Stooq 加了 JS proof-of-work 反爬蟲不解，改 Yahoo）。**FinMind token 在 repo 根
+    `.env`（已 gitignore），限流 600 次/小時**。三個關鍵陷阱已記錄於
+    `docs/data-sources.md` 第 22 節：(1) FRED 的 Akamai 封鎖「假瀏覽器 UA + 非瀏覽器
+    TLS 指紋」組合，FRED 請求必須用樸素 UA 覆蓋 `_http.BROWSER_UA`（macro_us.py 已修，
+    這與 TWSE/TPEx「必須帶瀏覽器 UA」正好相反）；(2) ws.dgbas.gov.tw 憑證鏈缺中繼 CA，
+    用 certifi+補中繼憑證的合併 bundle 解（非關驗證）；(3) data.gov.tw「M1B/M2變動
+    因素分析」是變動量分解不是年增率，正確資料集為「貨幣總計數」。`build_macro.py`
+    冪等可任意重跑（INSERT OR REPLACE），排程尚未掛（下一步可考慮併入 refresh_daily
+    或另立月更排程）。
   - **【第十四輪】`dashboard.html` 六大區塊可收折**：使用者要求「把總覽、板塊熱力圖、
     板塊排行、族群視圖、投信特寫這幾個資料區塊設置成可以收折，我只需要點開要進行對比
     的板塊就可以進行對照」，改 `export_dashboard.py` 的內嵌 JS/HTML 模板（純前端功能，
