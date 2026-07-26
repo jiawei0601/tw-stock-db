@@ -24,8 +24,25 @@
     這與 TWSE/TPEx「必須帶瀏覽器 UA」正好相反）；(2) ws.dgbas.gov.tw 憑證鏈缺中繼 CA，
     用 certifi+補中繼憑證的合併 bundle 解（非關驗證）；(3) data.gov.tw「M1B/M2變動
     因素分析」是變動量分解不是年增率，正確資料集為「貨幣總計數」。`build_macro.py`
-    冪等可任意重跑（INSERT OR REPLACE），排程尚未掛（下一步可考慮併入 refresh_daily
-    或另立月更排程）。
+    冪等可任意重跑（INSERT OR REPLACE）。
+  - **【第十五輪-2】崩盤領先指標實證 + 週日綜合監測排程**：
+    - `analysis/crash_leading_indicators.py` — 三層漏斗實證（美8次/台10次崩盤事件，
+      滾動252日高點回撤法；曾有「凍結高點吞掉TAIEX 2008/2011/2015」bug，經 sonnet
+      檢驗員發現後修正）。結論：第一梯隊=美10Y-3M/10Y-2Y倒掛+台M1B-M2死亡交叉
+      （領先1-3年）、第二梯隊=景氣燈號≥32+美CPI>5%+Fed急升息（過熱標記）、
+      第三梯隊=出口/PMI/領先指標轉負+失業率回升（轉折確認器）。
+    - `monitor_macro_funnel.py` — 週日綜合監測：`--refresh` 刷新 macro 資料＋pull
+      ai-cycle-scorecard repo → 評估 10 訊號＋綜合判讀（四級：常態/警戒期/過熱確認/
+      循環反轉）＋AI泡沫記分卡段 → Telegram 推播（tools/telegram/notify.py）→
+      寫入 Notion database「總經×AI泡沫 週報」（id 在 .env 的 NOTION_PARENT_ID，
+      token 取自 Hermes VM 同一組 integration；掛在「Hermes 對話備份」hub 頁下）。
+      `--dry-run` 只印不推。`tests/test_macro_funnel.py` 27 測試。
+    - 排程：**MacroFunnelWeekly，每週日 20:00**，wscript run-hidden.vbs 無黑窗包裝、
+      hermes venv python，log 在 `data/macro_funnel_task.log`。2026-07-26 已實跑一次
+      驗證全鏈路（Telegram 送達＋Notion 列寫入含結構化欄位）。
+    - ⚠️ 已知資料時滯：tw_monitoring_score/tw_leading_index 目前只到 2026-01、
+      tw_pmi 到 2026-02（FinMind 上游更新滯後），週報會如實顯示資料月份；若持續
+      未更新，考慮景氣指標改接國發會官方端點。
   - **【第十四輪】`dashboard.html` 六大區塊可收折**：使用者要求「把總覽、板塊熱力圖、
     板塊排行、族群視圖、投信特寫這幾個資料區塊設置成可以收折，我只需要點開要進行對比
     的板塊就可以進行對照」，改 `export_dashboard.py` 的內嵌 JS/HTML 模板（純前端功能，
