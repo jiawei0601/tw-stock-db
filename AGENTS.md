@@ -1,6 +1,6 @@
-# AGENTS.md — 專案統一規則（Claude Code 與 Antigravity 共用）
+# AGENTS.md — 專案統一規則（所有 AI agent 共用）
 
-> Claude Code 透過 CLAUDE.md（內含 @AGENTS.md）讀本檔；Antigravity 原生讀本檔。
+> Claude Code 透過 CLAUDE.md（內含 @AGENTS.md）讀本檔；Codex 等其他 agent 原生讀本檔。
 > 一份規則，兩邊共用，不分叉。
 
 ## 專案定位
@@ -337,7 +337,7 @@ refresh_daily.py                   -> 【第十二輪，第 12 步 publish 為�
 見 `docs/data-sources.md`（endpoint 實測結果：欄位、編碼、陷阱、過濾邏輯）。
 
 ## 跨 agent 交接紀律
-- repo 是唯一真相來源；交接資訊一律寫進 repo，不可只留私有記憶（Claude memory / Antigravity KI）。
+- repo 是唯一真相來源；交接資訊一律寫進 repo，不可只留私有記憶（如 Claude memory）。
 - 交出前：測試綠 → commit 乾淨（絕不交髒工作區）→ 更新 HANDOFF.md → 更新 issue。
 - 接手前：clean tree + pull → 讀 HANDOFF.md / issue / git log / 本檔 → 先複述現況與下一步再動手。
 - 架構決策寫 docs/adr/；任務狀態走 issues。
