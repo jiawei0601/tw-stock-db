@@ -25,3 +25,6 @@ backtest/run.log
 backtest/t1_signals.csv
 backtest/equity_curve.csv
 codex-design-review.log
+agy-entry.log
+agy-*.log
+backtest/entry_timing_detail.csv
