@@ -530,10 +530,33 @@ def _earliest_date(conn: sqlite3.Connection, table: str, date_col: str, sid: str
     return row[0] if row and row[0] else None
 
 
-def _gap_for(existing_earliest: str | None, target_date: str, granularity: str) -> tuple[str, str] | None:
+def _covers_target(existing_earliest: str | None, target_date: str, granularity: str, table: str = "") -> bool:
+    """既有最早日期是否已「涵蓋」目標日。目標日常不是交易日／季末／有資料的月份，
+    所以給容忍：日資料 10 天、季報 100 天（目標 2021-01-01 的第一個季末是 03-31）、月資料同月即可。
+    沒有容忍會讓每輪重抓一段永遠為空的 gap，白燒 FinMind 額度（2026-09-07 實際發生）。"""
+    if existing_earliest is None:
+        return False
+    if granularity == "month":
+        return existing_earliest[:7] <= target_date[:7]
+    from datetime import timedelta
+    tol = 100 if table == "eps_quarterly" else 10
+    limit = (datetime.strptime(target_date, "%Y-%m-%d") + timedelta(days=tol)).strftime("%Y-%m-%d")
+    return existing_earliest <= limit
+
+
+def _empty_gap_known(conn: sqlite3.Connection, sid: str, dataset: str, gap_start: str) -> bool:
+    """valuation_fetch_log 有 status='empty_gap:<gap_start>' 表示這段已確認 FinMind 無資料。"""
+    row = conn.execute(
+        "SELECT 1 FROM valuation_fetch_log WHERE stock_id=? AND dataset=? AND status=? LIMIT 1",
+        (sid, dataset, f"empty_gap:{gap_start}"),
+    ).fetchone()
+    return row is not None
+
+
+def _gap_for(existing_earliest: str | None, target_date: str, granularity: str, table: str = "") -> tuple[str, str] | None:
     """回傳需要補抓的 (gap_start, gap_end)（含端點），已足夠涵蓋目標日則回 None。
     沒有任何既有資料時，gap 是 [目標日, 今天]（整段從頭抓）。"""
-    if existing_earliest is not None and existing_earliest <= target_date:
+    if _covers_target(existing_earliest, target_date, granularity, table):
         return None
     if existing_earliest is None:
         gap_end = datetime.now(timezone.utc).strftime("%Y-%m-%d" if granularity == "day" else "%Y-%m")
@@ -611,11 +634,16 @@ def backfill_missing(
                 break
             tgt = target_by_dataset[dataset]
             earliest = _earliest_date(conn, table, date_col, sid)
-            gap = _gap_for(earliest, tgt, granularity)
+            gap = _gap_for(earliest, tgt, granularity, table)
             if gap is None:
                 skipped += 1
                 continue
             gap_start, gap_end = gap
+            # 上市較晚或 FinMind 無更早資料的股票，gap 會永遠為空；抓過一次確認為空就不再抓，
+            # 否則每輪白燒一次額度（2026-09-07 實測 218 次空請求）。
+            if _empty_gap_known(conn, sid, dataset, gap_start):
+                skipped += 1
+                continue
             now = _now_iso()
             data, err_status = _fetch_finmind(session, dataset, sid, gap_start, token, end_date=gap_end)
             if err_status is not None:
@@ -628,7 +656,7 @@ def backfill_missing(
                 conn.commit()
                 stopped_reason = status
                 break
-            status = "fetched" if data else "empty"
+            status = "fetched" if data else f"empty_gap:{gap_start}"
             rows_written = _write_backfill_batch(conn, dataset, sid, data)
             conn.execute(
                 "INSERT OR REPLACE INTO valuation_fetch_log (stock_id, dataset, fetched_at, status, rows) "
@@ -677,7 +705,7 @@ def backfill_status(
             earliest = _earliest_date(conn, table, date_col, sid)
             if earliest is not None:
                 have += 1
-                if earliest <= tgt:
+                if _covers_target(earliest, tgt, granularity, table):
                     done += 1
                     continue
             missing += 1

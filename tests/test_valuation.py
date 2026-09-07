@@ -309,3 +309,25 @@ def test_fm_revenue_monthly_no_duplicate_pk(conn):
         "SELECT COUNT(*), COUNT(DISTINCT stock_id || '|' || ym) FROM fm_revenue_monthly"
     ).fetchone()
     assert total == distinct
+
+
+def test_covers_target_tolerance():
+    """目標日非交易日時，最早日期在容忍範圍內視為已涵蓋，避免每輪重抓空 gap。"""
+    from build_valuation import _covers_target, _gap_for
+    assert _covers_target("2021-01-04", "2021-01-01", "day", "per_daily")
+    assert not _covers_target("2021-02-01", "2021-01-01", "day", "per_daily")
+    assert _covers_target("2021-03-31", "2021-01-01", "day", "eps_quarterly")
+    assert not _covers_target("2021-06-30", "2021-01-01", "day", "eps_quarterly")
+    assert _covers_target("2020-01", "2020-01-01", "month", "fm_revenue_monthly")
+    assert _gap_for("2021-01-04", "2021-01-01", "day", "per_daily") is None
+
+
+def test_empty_gap_known_skips_refetch(tmp_path):
+    import sqlite3
+    from build_valuation import _empty_gap_known
+    con = sqlite3.connect(tmp_path / "t.db")
+    con.execute("CREATE TABLE valuation_fetch_log (stock_id TEXT, dataset TEXT, fetched_at TEXT, status TEXT, rows INTEGER)")
+    con.execute("INSERT INTO valuation_fetch_log VALUES ('9999','TaiwanStockPER','2026-09-07','empty_gap:2021-01-01',0)")
+    assert _empty_gap_known(con, "9999", "TaiwanStockPER", "2021-01-01")
+    assert not _empty_gap_known(con, "9999", "TaiwanStockPER", "2020-01-01")
+    assert not _empty_gap_known(con, "9999", "TaiwanStockPrice", "2021-01-01")

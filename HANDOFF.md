@@ -1217,3 +1217,5 @@
 - 2026-09-07 委員會評估國巨 2327、上銀 2049（使用者指定），見 `analysis/committee-2327-2049-2026-09-07.md`。
 
 - 2026-09-07 回測框架 `backtest_valuation.py`（agy 實作、Claude 審查 approve，8 測試綠）：point-in-time 月頻回測，輸出 backtest/。首輪結果 L0/L1 在 2022–2026 相對等權 universe 為負超額（2024 例外），L2 待 fm_revenue_monthly 回填後重跑 `python backtest_valuation.py --out backtest/`。審查紀錄見 docs/tasks/reports/。
+
+- 2026-09-07 回填修正：目標日非交易日導致 done 永遠判 False、每輪重抓空 gap 燒額度（218 次空請求）。改 `_covers_target` 容忍（日 10 天／季報 100 天／月同月）＋ `empty_gap:<start>` 記錄後不再重抓。修正前 remaining 顯示 1024 是假的，實際剩 464（其中多數是上市較晚的股票，第一輪確認為空後即不再計）。
