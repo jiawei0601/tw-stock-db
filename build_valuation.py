@@ -66,6 +66,16 @@ CREATE TABLE IF NOT EXISTS eps_quarterly (
     PRIMARY KEY (stock_id, quarter_end)
 );
 
+-- 【2026-09-07】專存 FinMind TaiwanStockPrice 的估值用價格表，不受 daily_prices 的
+-- institutional_flow_daily 日期範圍限制、也不受 _cleanup_daily_prices_anomalies 清理
+-- 邏輯影響（daily_prices 每日排程落後，會把超出範圍的價格整批砍掉，見 HANDOFF.md）。
+CREATE TABLE IF NOT EXISTS fm_price_daily (
+    stock_id  TEXT NOT NULL,
+    date      TEXT NOT NULL,
+    close     REAL,
+    PRIMARY KEY (stock_id, date)
+);
+
 CREATE TABLE IF NOT EXISTS valuation_fetch_log (
     stock_id    TEXT NOT NULL,
     dataset     TEXT NOT NULL,
@@ -109,6 +119,8 @@ CREATE TABLE IF NOT EXISTS valuation_screen (
     rev_yoy_ytd      REAL,             -- 最新月 cumulative_yoy_pct 換算成小數
     rev_eps_diverge  INTEGER NOT NULL DEFAULT 0,  -- 營收轉負但 EPS 仍在成長頂點：
                                                    -- rev_yoy_3m<-0.10 且 eps_ttm_growth>0.20
+    price_date       TEXT,              -- 【2026-09-07】price 實際取自哪一天（可能早於
+                                         -- run_date，也可能是 daily_prices fallback）
     PRIMARY KEY (run_date, stock_id, universe)
 );
 """
@@ -135,6 +147,7 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         "ALTER TABLE valuation_screen ADD COLUMN rev_yoy_3m REAL",
         "ALTER TABLE valuation_screen ADD COLUMN rev_yoy_ytd REAL",
         "ALTER TABLE valuation_screen ADD COLUMN rev_eps_diverge INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE valuation_screen ADD COLUMN price_date TEXT",
     ):
         try:
             conn.execute(col_sql)
@@ -316,32 +329,23 @@ def import_cache(conn: sqlite3.Connection, cache_path: Path) -> dict:
             )
 
         elif dataset == "TaiwanStockPrice":
-            # daily_prices 是全市場既有表，只補「缺的」，已有的不覆蓋（避免跟
-            # build_daily_prices.py 的官方逐日回補資料互相覆蓋出入）。
-            # 兩條既有 invariant（見 tests/test_daily_prices.py）必須遵守：
-            # (1) close 必須是正數（cache 裡偶有 0 值的異常列，過濾掉不寫入）；
-            # (2) daily_prices 的日期範圍不可超出 institutional_flow_daily 的範圍
-            #     （本表存在目的就是對齊三大法人資料範圍），超出範圍的價格資料
-            #     （例如 cache 抓到比 institutional_flow_daily 更新的最近幾天）
-            #     一律不灌進 daily_prices，只留在 per_daily/eps_quarterly 供估值運算用。
-            existing = {
-                row[0] for row in conn.execute(
-                    "SELECT date FROM daily_prices WHERE stock_id = ?", (sid,)
-                ).fetchall()
-            }
-            inst_range = conn.execute(
-                "SELECT MIN(date), MAX(date) FROM institutional_flow_daily"
-            ).fetchone()
-            inst_min, inst_max = inst_range if inst_range and inst_range[0] else (None, None)
+            # 【2026-09-07 改動】估值用價格改灌 fm_price_daily，不再動 daily_prices。
+            # 理由：daily_prices 是全市場既有表，其 invariant 是「日期範圍不可超出
+            # institutional_flow_daily」，而 institutional_flow_daily 由每日排程刷新、
+            # 常態性落後（實測落後到 08-25 而 per_daily 已到 09-04），把估值用的最新
+            # 價格寫進 daily_prices 會被 _cleanup_daily_prices_anomalies 依 invariant
+            # 整批砍掉（這正是緯穎 6669 一拆三後新價格沒進 daily_prices、split_flag
+            # 誤判為 0 的根因）。fm_price_daily 只有 close<=0 這一條過濾，不受
+            # institutional_flow_daily 日期範圍限制，直接整批 INSERT OR REPLACE
+            # （比 daily_prices 的「只補缺」寬鬆，因為這裡沒有跟另一支官方回補腳本
+            # 互相覆蓋的疑慮，fm_price_daily 只有這支腳本會寫）。
             batch = [
                 (sid, d["date"], d.get("close"))
                 for d in data
                 if d.get("date") and d.get("close") is not None and d["close"] > 0
-                and d["date"] not in existing
-                and (inst_min is None or inst_min <= d["date"] <= inst_max)
             ]
             conn.executemany(
-                "INSERT OR REPLACE INTO daily_prices (stock_id, date, close) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO fm_price_daily (stock_id, date, close) VALUES (?, ?, ?)",
                 batch,
             )
             price_rows += len(batch)
@@ -352,7 +356,7 @@ def import_cache(conn: sqlite3.Connection, cache_path: Path) -> dict:
             )
 
     conn.commit()
-    return {"per_daily_rows": per_rows, "eps_quarterly_rows": eps_rows, "daily_prices_rows": price_rows}
+    return {"per_daily_rows": per_rows, "eps_quarterly_rows": eps_rows, "fm_price_daily_rows": price_rows}
 
 
 # ---------------------------------------------------------------------------
@@ -389,9 +393,12 @@ def _fetch_finmind(session, dataset: str, sid: str, start_date: str, token: str)
 
 
 def fetch_missing(conn: sqlite3.Connection, universe: dict[str, tuple[str, str]]) -> dict:
-    """對 universe 中 per_daily 或 eps_quarterly 仍缺資料的股票補抓 FinMind。
-    有資料的（per_daily 或 eps_quarterly 已有該股票任何一列）視為「已抓過」直接跳過 ——
-    不逐筆比對日期範圍是否完整，維持跟舊腳本一致的『整段快取即視為完成』語意。
+    """對 universe 中 per_daily / eps_quarterly / fm_price_daily 仍缺資料的股票補抓
+    FinMind。有資料的（該表已有該股票任何一列）視為「已抓過」直接跳過 —— 不逐筆比對
+    日期範圍是否完整，維持跟舊腳本一致的『整段快取即視為完成』語意。
+    【2026-09-07 起】新增 TaiwanStockPrice → fm_price_daily（原本本函式只抓
+    TaiwanStockPER / TaiwanStockFinancialStatements，完全沒有補抓價格的路徑——這是
+    之前那批 155 檔 --fetch 沒有留下任何價格資料的根因，見 HANDOFF.md）。
     遇 402/403 立即停止，回傳目前進度供呼叫端印出。"""
     import requests  # 延遲 import，--import-cache / --screen 不需要 requests 也能跑
 
@@ -401,6 +408,7 @@ def fetch_missing(conn: sqlite3.Connection, universe: dict[str, tuple[str, str]]
 
     have_per = {row[0] for row in conn.execute("SELECT DISTINCT stock_id FROM per_daily").fetchall()}
     have_eps = {row[0] for row in conn.execute("SELECT DISTINCT stock_id FROM eps_quarterly").fetchall()}
+    have_price = {row[0] for row in conn.execute("SELECT DISTINCT stock_id FROM fm_price_daily").fetchall()}
 
     fetched = 0
     skipped = 0
@@ -412,6 +420,7 @@ def fetch_missing(conn: sqlite3.Connection, universe: dict[str, tuple[str, str]]
         for dataset, start_date, have_set in (
             ("TaiwanStockPER", PER_START, have_per),
             ("TaiwanStockFinancialStatements", FIN_START, have_eps),
+            ("TaiwanStockPrice", PER_START, have_price),
         ):
             if sid in have_set:
                 skipped += 1
@@ -443,6 +452,11 @@ def fetch_missing(conn: sqlite3.Connection, universe: dict[str, tuple[str, str]]
                 batch = [(sid, d["date"], d.get("value")) for d in data if d.get("type") == "EPS" and d.get("date")]
                 conn.executemany(
                     "INSERT OR REPLACE INTO eps_quarterly (stock_id, quarter_end, eps) VALUES (?, ?, ?)", batch)
+            elif dataset == "TaiwanStockPrice" and data:
+                batch = [(sid, d["date"], d.get("close"))
+                         for d in data if d.get("date") and d.get("close") is not None and d["close"] > 0]
+                conn.executemany(
+                    "INSERT OR REPLACE INTO fm_price_daily (stock_id, date, close) VALUES (?, ?, ?)", batch)
             conn.commit()
             fetched += 1
             time.sleep(FETCH_SLEEP_SECONDS)
@@ -473,6 +487,47 @@ def _detect_split_flag(prices_sorted: list[tuple[str, float]]) -> bool:
         if prev_close and cur_close and prev_close > 0:
             if abs(cur_close / prev_close - 1) > 0.4:
                 return True
+    return False
+
+
+def _detect_split_via_per_jump(
+    per_rows_sorted: list[tuple[str, float]],
+    eps_quarter_ends: list[str],
+) -> bool:
+    """【2026-09-07 新增】第二道分割/減資保險：只靠 fm_price_daily/daily_prices 抓
+    分割會有盲點——如果價格資料本身缺漏（例如某檔剛好兩份 cache 都沒收到、也還沒
+    --fetch 補上），單日跳價根本看不到。但 PER = price / EPS，只要 EPS 分母沒變，
+    分割造成的價格跳動一樣會反映在 PER 的日對日跳動上（例如 1 股拆 3 股，價格變 1/3，
+    PER 也跟著變 1/3，跟真的獲利掉了 2/3 在數字上無法區分，必須排除「EPS 剛好在同一
+    時間點跳變」的情況——那種是財報認列的正常波動，不是分割）。
+    邏輯：per_daily 中若某日 PER 相對前一日變動 |Δ|>40%，且該日期附近（±10 天，涵蓋
+    財報公告到 FinMind 更新的時間差）沒有任何 eps_quarterly 的 quarter_end，視為
+    疑似分割（EPS 沒有同期跳變可以解釋這個 PER 跳動，只能是價格本身跳動）。"""
+    if len(per_rows_sorted) < 2:
+        return False
+    from datetime import date as _date
+
+    def _to_date(s: str):
+        try:
+            return _date.fromisoformat(s)
+        except (ValueError, TypeError):
+            return None
+
+    quarter_dates = [d for d in (_to_date(q) for q in eps_quarter_ends) if d is not None]
+
+    for i in range(1, len(per_rows_sorted)):
+        prev_date, prev_per = per_rows_sorted[i - 1]
+        cur_date, cur_per = per_rows_sorted[i]
+        if not prev_per or not cur_per or prev_per <= 0:
+            continue
+        if abs(cur_per / prev_per - 1) <= 0.4:
+            continue
+        cur_d = _to_date(cur_date)
+        if cur_d is None:
+            continue
+        near_quarter_end = any(abs((cur_d - qd).days) <= 10 for qd in quarter_dates)
+        if not near_quarter_end:
+            return True
     return False
 
 
@@ -520,6 +575,17 @@ def _revenue_metrics(conn: sqlite3.Connection, sid: str, eps_ttm_growth: float |
     }
 
 
+def _price_asof(rows_sorted: list[tuple[str, float]], asof_date: str) -> tuple[float, str] | None:
+    """從 (date, close) 排序列取 asof_date 當天收盤；沒有就取 <= asof_date 最近一筆。
+    回傳 (close, 實際日期) 或 None（完全沒有 <= asof_date 的資料）。"""
+    best = None
+    for d, close in rows_sorted:
+        if d > asof_date:
+            break
+        best = (close, d)
+    return best
+
+
 def _screen_one(conn: sqlite3.Connection, sid: str, name: str, universe: str, sub: str, sub_multi: bool = False) -> dict | None:
     per_rows = conn.execute(
         "SELECT date, per, pbr, dividend_yield FROM per_daily WHERE stock_id = ? ORDER BY date", (sid,)
@@ -544,11 +610,38 @@ def _screen_one(conn: sqlite3.Connection, sid: str, name: str, universe: str, su
     pbr_p25 = _pct(pbr_vals, 0.25) if pbr_vals else None
     pbr_p75 = _pct(pbr_vals, 0.75) if pbr_vals else None
 
-    price_rows = conn.execute(
-        "SELECT date, close FROM daily_prices WHERE stock_id = ? ORDER BY date", (sid,)
+    # 【2026-09-07 改動】price/split 偵測改讀 fm_price_daily（估值專屬、不受
+    # daily_prices 的 institutional_flow_daily 日期範圍限制），fm_price_daily
+    # 完全沒有該檔資料時才 fallback daily_prices（並在 price_date 標記來源）。
+    fm_price_rows = conn.execute(
+        "SELECT date, close FROM fm_price_daily WHERE stock_id = ? ORDER BY date", (sid,)
     ).fetchall()
-    cur_price = price_rows[-1][1] if price_rows else None
+    if fm_price_rows:
+        price_rows = fm_price_rows
+        price_source = "fm_price_daily"
+    else:
+        price_rows = conn.execute(
+            "SELECT date, close FROM daily_prices WHERE stock_id = ? ORDER BY date", (sid,)
+        ).fetchall()
+        price_source = "daily_prices_fallback"
+
+    price_result = _price_asof(price_rows, last_date)
+    if price_result is not None:
+        cur_price, price_date = price_result
+        if price_source == "daily_prices_fallback":
+            price_date = f"{price_date}(daily_prices_fallback)"
+    else:
+        cur_price, price_date = None, None
+
     split_flag = _detect_split_flag(price_rows)
+    if not split_flag:
+        # 第二道保險：per_daily 本身的日對日 PER 跳動，不依賴價格資料是否完整。
+        split_flag = _detect_split_via_per_jump(
+            [(d, per) for d, per, _, _ in pers],
+            [q for q, _ in conn.execute(
+                "SELECT quarter_end, eps FROM eps_quarterly WHERE stock_id = ? AND eps IS NOT NULL", (sid,)
+            ).fetchall()],
+        )
 
     eps_ttm = (cur_price / cur_per) if (cur_price is not None and cur_per) else None
 
@@ -621,6 +714,7 @@ def _screen_one(conn: sqlite3.Connection, sid: str, name: str, universe: str, su
         "split_flag": split_flag, "band_ok": band_ok,
         "not_ok_reason": "；".join(reasons) if reasons else None,
         "category": category, "last_date": last_date, "sub_multi": sub_multi,
+        "price_date": price_date,
         **rev_metrics,
     }
 
@@ -653,8 +747,8 @@ def screen(conn: sqlite3.Connection) -> dict:
                 per_p25, per_p50, per_p75, position, fair_low, fair_high,
                 pbr, pbr_p25, pbr_p75, dividend_yield, per_points, eps_quarters,
                 eps_cv, loss_q, eps_ttm_growth, split_flag, band_ok, not_ok_reason, category,
-                sub_multi, rev_ym_latest, rev_yoy_3m, rev_yoy_ytd, rev_eps_diverge
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                sub_multi, rev_ym_latest, rev_yoy_3m, rev_yoy_ytd, rev_eps_diverge, price_date
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_date, r["stock_id"], r["name"], r["universe"], r["sub"], r["price"], r["per"],
@@ -663,6 +757,7 @@ def screen(conn: sqlite3.Connection) -> dict:
                 r["eps_cv"], r["loss_q"], r["eps_ttm_growth"], int(r["split_flag"]), int(r["band_ok"]),
                 r["not_ok_reason"], r["category"], int(r["sub_multi"]),
                 r["rev_ym_latest"], r["rev_yoy_3m"], r["rev_yoy_ytd"], int(r["rev_eps_diverge"]),
+                r["price_date"],
             ),
         )
     conn.commit()
@@ -695,7 +790,7 @@ def main() -> None:
             result = import_cache(conn, Path(cache_path))
             print(f"  per_daily +{result['per_daily_rows']} 列、"
                   f"eps_quarterly +{result['eps_quarterly_rows']} 列、"
-                  f"daily_prices +{result['daily_prices_rows']} 列（補缺）")
+                  f"fm_price_daily +{result['fm_price_daily_rows']} 列")
 
         if args.fetch:
             universe = {**ai_chain_universe(), **semiconductor_universe(conn)}

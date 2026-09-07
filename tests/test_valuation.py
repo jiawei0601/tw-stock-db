@@ -24,8 +24,20 @@ def test_tables_exist(conn):
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall()}
-    for t in ("per_daily", "eps_quarterly", "valuation_fetch_log", "valuation_screen"):
+    for t in ("per_daily", "eps_quarterly", "valuation_fetch_log", "valuation_screen", "fm_price_daily"):
         assert t in tables, f"缺少表 {t}，請先跑 python build_valuation.py --import-cache ... --screen"
+
+
+def test_fm_price_daily_no_duplicate_pk(conn):
+    total, distinct = conn.execute(
+        "SELECT COUNT(*), COUNT(DISTINCT stock_id || '|' || date) FROM fm_price_daily"
+    ).fetchone()
+    assert total == distinct
+
+
+def test_valuation_screen_has_price_date_column(conn):
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(valuation_screen)").fetchall()}
+    assert "price_date" in cols
 
 
 def test_per_daily_no_duplicate_pk(conn):
@@ -97,6 +109,49 @@ def test_split_flag_false_for_normal_price_series():
         ("2026-09-04", 100.5),
     ]
     assert bv._detect_split_flag(prices_sorted) is False
+
+
+def test_price_asof_exact_date_match():
+    rows = [("2026-09-01", 100.0), ("2026-09-02", 101.0), ("2026-09-04", 102.0)]
+    assert bv._price_asof(rows, "2026-09-04") == (102.0, "2026-09-04")
+
+
+def test_price_asof_falls_back_to_most_recent_earlier_date():
+    """PER 最後日在 fm_price_daily 缺當天資料時，取 <= 該日最近一筆。"""
+    rows = [("2026-08-20", 100.0), ("2026-08-25", 105.0)]
+    assert bv._price_asof(rows, "2026-09-04") == (105.0, "2026-08-25")
+
+
+def test_price_asof_none_when_no_data_before_asof():
+    rows = [("2026-09-10", 100.0)]
+    assert bv._price_asof(rows, "2026-09-04") is None
+
+
+def test_split_via_per_jump_detects_jump_without_eps_change():
+    """per_daily 本身跳動 >40%，附近沒有 eps_quarterly 的 quarter_end 可解釋，
+    視為疑似分割（第二道保險，不依賴價格資料是否完整）。"""
+    per_rows = [
+        ("2026-08-31", 25.0),
+        ("2026-09-01", 25.01),
+        ("2026-09-02", 8.37),
+        ("2026-09-04", 8.22),
+    ]
+    assert bv._detect_split_via_per_jump(per_rows, eps_quarter_ends=["2026-06-30"]) is True
+
+
+def test_split_via_per_jump_false_when_near_quarter_end():
+    """PER 跳動剛好發生在財報認列（quarter_end 附近 10 天內），視為正常 EPS 波動，
+    不誤判為分割。"""
+    per_rows = [
+        ("2026-08-10", 25.0),
+        ("2026-08-12", 8.5),
+    ]
+    assert bv._detect_split_via_per_jump(per_rows, eps_quarter_ends=["2026-08-14"]) is False
+
+
+def test_split_via_per_jump_false_for_normal_series():
+    per_rows = [("2026-08-31", 20.0), ("2026-09-01", 20.5), ("2026-09-02", 19.8)]
+    assert bv._detect_split_via_per_jump(per_rows, eps_quarter_ends=[]) is False
 
 
 def test_band_ok_false_when_split_flag_true():

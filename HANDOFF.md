@@ -1131,3 +1131,42 @@
       皆為 `monthly_revenue` 完全沒有資料的個股，非計算錯誤）。
 
 - 2026-09-07 11:45：根目錄 0 byte `tw_stocks.db` 雜檔已刪除（使用者指示）。
+
+- **2026-09-07 估值價格改用 fm_price_daily（修緯穎 6669 誤判低估）**：`daily_prices`
+  是全市場既有表，其 invariant 是「日期範圍不可超出 `institutional_flow_daily`」，
+  而 `institutional_flow_daily` 由每日排程刷新、常態性落後（實測落後到 08-25，
+  而 `per_daily` 已到 09-04）。之前 `--import-cache` 把 FinMind 價格灌進
+  `daily_prices` 又因超出 `institutional_flow_daily` 範圍被 `_cleanup_daily_prices_
+  anomalies` 整批清掉，導致 `--screen` 的 price 全是舊價、且緯穎 2026-09-02 一拆三
+  （7800→2610）沒進 `daily_prices`，`split_flag=0`、`band_ok=1`，誤判為低估。
+  - 新表 `fm_price_daily(stock_id, date, close)`，專存 FinMind `TaiwanStockPrice`，
+    不受 `daily_prices` 的日期範圍/清理邏輯影響（只有這支腳本會寫，沒有跟官方逐日
+    回補腳本互相覆蓋的疑慮）。`--import-cache` 與 `--fetch` 的 `TaiwanStockPrice`
+    都改灌這裡；`daily_prices` 完全不再被 `build_valuation.py` 寫入。
+  - **發現 `--fetch` 一直沒有補抓價格的路徑**（`fetch_missing()` 原本只抓
+    `TaiwanStockPER`/`TaiwanStockFinancialStatements`，沒有 `TaiwanStockPrice`）——
+    之前那批 155 檔 `--fetch` 補抓的資料裡完全沒有價格，不是「抓了又被清掉」，是
+    根本沒抓。已補上 `TaiwanStockPrice` 分支，`fm_price_daily` 缺資料的股票下次
+    `--fetch` 會自動補（目前 universe 256 檔中 156 檔缺 `fm_price_daily`，多為 -KY
+    境外掛牌與小型股，見 commit diff 或重跑 `--fetch` 前查詢）。
+  - `--screen`：price 與 split 偵測改讀 `fm_price_daily`，取 PER 最後日當天收盤，
+    無當天資料則取 ≤ 該日最近一筆，新增 `price_date` 欄位記錄實際取用日期（fallback
+    到 `daily_prices` 時額外標記 `(daily_prices_fallback)`）。`fm_price_daily`
+    完全沒資料的 156 檔會 fallback `daily_prices`（08-25 舊價，price_date 有標記，
+    不會誤讀成新鮮資料）。
+  - 分割偵測新增第二道保險 `_detect_split_via_per_jump`：per_daily 日對日 PER
+    跳動 >40% 且附近（±10天）沒有 `eps_quarterly` 的 quarter_end 可解釋，視為疑似
+    分割——不依賴價格資料是否完整，補上「價格缺漏時漏判」的盲點。
+  - 驗證：6669 緯穎 price=2565.0、price_date=2026-09-04、split_flag=1、band_ok=0
+    （修復前 band_ok=1 誤判低估）。`ai_chain`／`semiconductor` 兩個 universe「低於
+    合理區間且 band_ok=1」分別從（舊快照 6／15）降到 4／11，緯穎因 split_flag 修正
+    退出清單。
+  - 測試：`tests/test_valuation.py` 新增 `fm_price_daily` 表存在＋PK 唯一、
+    `price_date` 欄位存在、`_price_asof`（精確命中/fallback最近一筆/查無資料三種
+    情境）、`_detect_split_via_per_jump`（有跳動無EPS解釋/跳動在quarter_end附近/
+    正常序列三種情境）共 9 個新測試，全部用假資料不碰真實 db。
+  - **待辦（不在本次任務範圍）**：`daily_prices`/`institutional_flow_daily` 每日
+    落後到 08-25 這件事本身要另外查 `refresh_daily.py` 排程為何沒跟上（`per_daily`
+    走的是 `build_valuation.py` 自己的 cache/fetch 流程，不受 `refresh_daily.py`
+    管，兩條鏈進度不同步是本次踩雷的根本背景，需要排查 `TwStockDbDaily` 排程近期
+    執行紀錄 `data/refresh.log`）。
