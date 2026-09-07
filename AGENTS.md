@@ -45,7 +45,7 @@ build/run 段落與 Interface Contract。**【第十一輪，本專案主產出�
     2 分鐘（72 次節流過的請求：36 個月 x 2 市場）。**內建舊範圍偵測**：若偵測到非最近
     幾個月的資料仍是舊版窄範圍（第七輪擴大前只涵蓋 91 檔），會自動清空
     `monthly_revenue`／`revenue_fetch_log` 後整個重新 backfill，不會誤判成「已抓過」
-    而跳過（這是第七輪實測時真的踩到的坑，見 HANDOFF.md 第七輪紀錄）。
+    而跳過（這是第七輪實測時真的踩到的坑，見 docs/handoff-archive.md 第七輪紀錄）。
   - `python build_fundamentals.py [--db-path PATH]`（**【第七輪起】篩選範圍改為
     `stocks` 全市場**，目前 1971 檔，動態查詢不寫死清單，`shareholding_concentration`
     表整批快照覆蓋，idempotent；月營收已搬到 `build_revenue_history.py`，見上）。
@@ -178,7 +178,7 @@ build/run 段落與 Interface Contract。**【第十一輪，本專案主產出�
     （append；超過 5MB 自動砍掉前半只保留後半，避免無限增長）。**第 12 步 publish**
     把匯出物發布到公開 GitHub repo：`git add` **只加入白名單路徑**
     `dashboard.html` 與 `analysis/*.html`（**絕不 `git add -A`**，防止任何意外檔案
-    被自動推上公開 repo，見 HANDOFF.md「公開化紀律」）；`git diff --cached --quiet` 判斷無
+    被自動推上公開 repo，見 docs/handoff-archive.md「公開化紀律」）；`git diff --cached --quiet` 判斷無
     變更就跳過（log 記「無變更，跳過發布」，視為成功不計入失敗）；有變更則
     `git commit -m "每日自動更新 YYYY-MM-DD"` 後 `git push origin master`。**單步失敗
     不中止**——記錄後繼續跑後續步驟（增量抓取失敗隔天會自動補上，彙總/匯出步驟用現有
@@ -190,7 +190,7 @@ build/run 段落與 Interface Contract。**【第十一輪，本專案主產出�
     log。`--no-publish` 可跳過第 12 步 publish（本機測試/演練用，不影響前 11 步）。
     exit code：全成功 0、有失敗 1（供排程系統判斷）。**排程本身沿用既有
     `TwStockDbDaily`（週一至五 18:30），publish 步驟隨排程自動生效，不需要另外註冊**，
-    見 HANDOFF.md 第十二輪紀錄。
+    見 docs/handoff-archive.md 第十二輪紀錄。
   - 十三個 build/export 腳本（不含 `refresh_daily.py` 本身與 `build_db.py`）彼此獨立、
     互不覆寫對方的表，可任意順序重跑，但**不可同時併發跑**（SQLite 單寫入者限制）——
     這正是 `refresh_daily.py` 選擇嚴格串行、不做平行化的理由。
@@ -292,7 +292,7 @@ refresh_daily.py                   -> 【第十二輪，第 12 步 publish 為�
    累積式時序表」。`institutional_flow_summary` 的 5/20/60 日彙總計算邏輯不變，只是
    資料來源改讀本地 `institutional_flow_daily`。**【第七輪】** `sector_flow_daily` PK
    為 `(industry_name, date)`，**範圍改為全市場**（`stocks` 表全部，不再限定
-   `stock_groups` 91 檔橫跨的板塊），理由見 HANDOFF.md 第七輪紀錄。
+   `stock_groups` 91 檔橫跨的板塊），理由見 docs/handoff-archive.md 第七輪紀錄。
    **【第七輪】`monthly_revenue`／`shareholding_concentration`／`institutional_
    flow_daily`／`institutional_flow_summary`／`sector_flow_daily` 這五張表的篩選範圍
    從 `stock_groups`（91 檔概念股）擴大為 `stocks` 全市場（目前 1971 檔），schema 本身

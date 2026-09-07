@@ -90,7 +90,7 @@ python refresh_daily.py --no-publish   # 前 11 步照跑，跳過第 12 步 pub
 ```
 
 本機排程 `TwStockDbDaily`（週一至五 18:30）已註冊，細節與直譯器依賴警告見
-[HANDOFF.md](HANDOFF.md) 第十二輪紀錄。停用：`schtasks /delete /tn TwStockDbDaily /f`。
+[docs/handoff-archive.md](docs/handoff-archive.md) 第十二輪紀錄。停用：`schtasks /delete /tn TwStockDbDaily /f`。
 
 ## 估值篩選（build_valuation.py）
 
@@ -146,7 +146,7 @@ python build_valuation.py --screen    # 重跑篩選，sub 改讀新表
   `build_sub_industry.py` 印出的清單即為目前缺口。
 - 建議更新頻率：每季（產業鏈成分股變動不快）。手動重跑 `build_sub_industry.py` 即可，
   未排入 `refresh_daily.py` 每日鏈（避免每天對同一個幾乎不變的頁面發請求）。
-- 「其他」分布從舊 dict 的 147/190 降到 21/190（見 HANDOFF.md 2026-09-07 紀錄的完整
+- 「其他」分布從舊 dict 的 147/190 降到 21/190（見 docs/handoff-archive.md 2026-09-07 紀錄的完整
   分布表）。
 
 ## 專案定位與慣例
