@@ -2,11 +2,42 @@
 
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。
 
-- 最後更新：Claude Code @ 2026-07-26（第十五輪：新增總經指標庫 `macro_series`/
-  `macro_observations`，美台共 39 序列 15 萬筆，詳見下方「【第十五輪】總經指標庫」小節）
+- 最後更新：Claude Code @ 2026-09-07（第十六輪：新增估值篩選表 `build_valuation.py`，
+  合併 `ai-valuation-screen/` 舊散裝腳本，詳見下方「【第十六輪】估值篩選表」小節）
 - 目前任務 / 目標：建立台股上市（TWSE）＋上櫃（TPEx）股票基本資料庫，含官方產業別（板塊）
   標記，為未來「資金流向依板塊/族群視覺化網頁」鋪路的資料底層。
 - 已完成：
+  - **【第十六輪】估值篩選表（per_daily / eps_quarterly / valuation_fetch_log /
+    valuation_screen）**：把 `C:\CLAUDE\專案-投資\ai-valuation-screen\` 下兩支散裝
+    腳本（`ai_valuation_v2.py` AI 供應鏈 83 檔、`semi_screen.py` 半導體全市場，各自
+    手動維護 CSV/JSON cache、無資料庫）合併進本 repo，新增 `build_valuation.py`
+    （三個獨立冪等子命令）＋ `tests/test_valuation.py`（10 測試，含 PK 唯一性、位置
+    公式、split_flag 偵測邏輯，全綠）：
+    - `--import-cache <json>`：把兩份舊 cache（`semi_cache.json` 118 key / 91 檔、
+      `v2_cache.json` 258 key / 83 檔）灌入 `per_daily`（+79k 列）/ `eps_quarterly`
+      （+1080 列）；`daily_prices` 只補缺，且過濾掉 close<=0 異常列與超出
+      `institutional_flow_daily` 涵蓋範圍的日期（守住 `tests/test_daily_prices.py`
+      的既有 invariant——**第一次匯入時沒過濾，灌進了 0 值與 2026-09-04 的未來日期
+      污染 daily_prices，導致既有 3 個測試變紅；已修正 `_cleanup_daily_prices_
+      anomalies()` 在每次 `--import-cache` 開頭自我修復並重新 import，全綠**，
+      這是本輪唯一踩到的坑，記錄避免未來重蹈）。
+    - `--fetch`：對缺資料股票補抓 FinMind（**本輪未執行**——FinMind 免費額度當天
+      已耗盡（402）且 IP 暫時被 403 封鎖，任務要求本輪不可再打 API）。續跑指令：
+      `python build_valuation.py --fetch`（會自動跳過已有資料的股票，從中斷處續抓，
+      每檔間隔 0.6 秒，遇 402/403 立刻停止並寫 `valuation_fetch_log`）。
+    - `--screen`：純本地運算寫入 `valuation_screen`，已實跑：run_date=2026-09-04，
+      **134 列**（ai_chain 83 檔全部有資料、semiconductor 51/206 檔有資料——半導體
+      全市場只有 cache 涵蓋的子集能算，其餘 155 檔要等 `--fetch` 補資料才會出現在
+      screen 結果，band_ok=65（ai_chain 45、semiconductor 20），分類分布：區間內 41、
+      低於合理區間 25、高於區間 68。
+    - **緯穎（6669）分割盲點**：2026-09-02 一拆三，收盤價 7800→2610（單日跌幅
+      ~66.5%），原 `ai_valuation_v2.py` 完全沒有分割偵測，`semi_screen.py` 雖有
+      「近 60 交易日單日跳動 >40%」偵測但只套用在半導體 universe（緯穎屬 ai_chain
+      universe 不會被檢查到）。`build_valuation.py` 把這個偵測統一套用到兩個
+      universe，`split_flag=True` 時 `band_ok` 強制 `False`（`_screen_one()` 已驗證
+      6669 正確標記 `split_flag=1, band_ok=0, not_ok_reason='疑似分割/減資'`）。
+    - `ai-valuation-screen/README.md` 已改成一行指向本 repo，兩支舊腳本與 cache 檔
+      本身**未刪除**（保留當歷史紀錄，未來不再維護）。
   - **【第十五輪】總經指標庫（macro_series + macro_observations）**：使用者原想從
     MacroMicro 下載美/台熱門總經數據，但下載功能要企業訂閱（TWD 20萬/年），改用免費
     來源自建等價資料庫。新增 `build_macro.py`＋`collectors/macro_us.py`（FRED 免金鑰

@@ -38,6 +38,8 @@ python -m pytest tests/ -q    # 驗證
   `industry_name`（官方產業別文字）、`cfi_code`、`updated_at`。
 - `stock_groups`：族群/概念股標記表，**本次任務只建表結構、不填資料**（沒有官方資料來源，
   留給未來任務）。欄位：`stock_id`、`group_name`、`group_type`、`source`、`created_at`。
+- `per_daily` / `eps_quarterly` / `valuation_fetch_log` / `valuation_screen`：估值篩選表
+  （AI 供應鏈 83 檔 + 半導體全市場），詳見下方「估值篩選（build_valuation.py）」小節。
 
 ## 資料來源
 
@@ -88,6 +90,35 @@ python refresh_daily.py --no-publish   # 前 11 步照跑，跳過第 12 步 pub
 
 本機排程 `TwStockDbDaily`（週一至五 18:30）已註冊，細節與直譯器依賴警告見
 [HANDOFF.md](HANDOFF.md) 第十二輪紀錄。停用：`schtasks /delete /tn TwStockDbDaily /f`。
+
+## 估值篩選（build_valuation.py）
+
+合併自舊 `ai-valuation-screen/` 兩支散裝腳本（`ai_valuation_v2.py` AI 供應鏈 83 檔、
+`semi_screen.py` 半導體全市場）的 PER/PBR 三年分位 + 八季 EPS 品質篩選，統一寫進本
+repo 的 SQLite，脫離手動 CSV/JSON cache 流程：
+
+```
+python build_valuation.py --import-cache <cache.json> [--import-cache <another.json> ...]
+                           --screen
+```
+
+- `--import-cache`：把舊腳本留下的 JSON cache（key 格式 `股號:dataset:起日`）灌入
+  `per_daily`/`eps_quarterly`；`daily_prices` 只補缺，且會過濾掉 close<=0 或超出
+  `institutional_flow_daily` 涵蓋範圍的異常列（維持既有 invariant）。可重複執行、
+  可疊加多份 cache。
+- `--fetch`：對 universe（AI 供應鏈 + `stocks` 表 industry_name 含「半導體」的全市場）
+  中仍缺資料的股票才打 FinMind API 補抓，每檔請求間隔 0.6 秒。**FinMind 免費額度有限
+  且耗盡後 IP 會暫時被 403 封鎖**——遇 402/403 會立刻停止並把進度寫進
+  `valuation_fetch_log`，下次重跑：
+  ```
+  python build_valuation.py --fetch
+  ```
+  會自動跳過已有資料的股票、從中斷處續抓，不需要額外參數。
+- `--screen`：純本地運算（PER 位置、合理價區間、PBR 分位、eps_cv/loss_q/eps_ttm_growth、
+  `split_flag`、`band_ok`），寫入 `valuation_screen`。**`split_flag=True` 時 `band_ok`
+  一律強制 `False`**——緯穎（6669）2026-09-02 一拆三（收盤價 7800→2610）是本輪新增的
+  已知盲點修正，原 `ai_valuation_v2.py` 完全沒有分割偵測、`semi_screen.py` 雖有偵測但
+  只套用在半導體 universe，本腳本統一套用到兩個 universe。
 
 ## 專案定位與慣例
 
