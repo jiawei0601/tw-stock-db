@@ -1089,3 +1089,43 @@
   - 怎麼重跑：`python build_sub_industry.py` → `python build_valuation.py --screen`。
 
 - 2026-09-07 11:30 交接狀態：`tests/test_fundamentals_content.py` 3 紅（monthly_revenue 與 institutional_flow 各有 2867/4130/5371 三檔孤兒列，因 build_db.py 重建 stocks 表後這三檔已下市；freshness 0.938<0.95）。皆為資料時滯，非估值/子產業程式問題，預期 18:30 `refresh_daily.py` 排程跑完後恢復；若未恢復需在 build_db.py 補孤兒列清理。repo 根目錄有一個 0 byte 的 `tw_stocks.db` 雜檔（未追蹤），可手動刪除。
+
+- **2026-09-07 營收 vs EPS 背離四欄（`build_valuation.py` / `valuation_screen`）**：
+  純本地讀 `monthly_revenue`（不打 FinMind API），`get_conn()` 用跟 `sub_multi` 同樣的
+  冪等 `ALTER TABLE ADD COLUMN` 模式補四個新欄位，舊 db 直接可用。
+  - `rev_ym_latest`：該檔 `monthly_revenue` 最新月份，DB 存 `'YYYY-MM'`，輸出轉成
+    `'YYYYMM'`（如 `'2026-07'` → `'202607'`）。
+  - `rev_yoy_3m`：最近 3 個月 `revenue` 合計 / 去年同 3 個月 `revenue_last_year_month`
+    合計 − 1（**用金額加總算，不是對 `yoy_pct` 取平均**——加權天然反映大月份權重更高，
+    對 `yoy_pct` 取算術平均會失真）。不足 3 個月或任一月缺 `revenue_last_year_month`
+    記 `NULL`。
+  - `rev_yoy_ytd`：最新月 `cumulative_yoy_pct`（DB 存百分比數字，如 `37.01`）除以 100
+    換算成小數。
+  - `rev_eps_diverge`：`rev_yoy_3m < -0.10` 且 `eps_ttm_growth > 0.20` → `1`，否則
+    `0`——「營收已轉負但 EPS 仍在頂」型態（EPS TTM 年增仍在高速成長區，但最近三個月
+    營收已經年減超過一成，常見於庫存去化/認列時點錯位，值得留意估值是否領先反映了
+    尚未反映到營收面的訊號）。
+  - 計算邏輯集中在新函式 `_revenue_metrics(conn, sid, eps_ttm_growth)`（純函式，吃
+    `conn` 只讀，回傳 dict），`_screen_one()` 算完 `eps_ttm_growth` 後呼叫並用
+    `**rev_metrics` 併入回傳 dict；`screen()` 的 `INSERT` 語句同步補上四欄。
+  - 測試：`tests/test_valuation.py` 新增 4 個測試（欄位存在性 + `rev_yoy_3m` 公式
+    範例 + `rev_eps_diverge` 標記/不標記兩種情境 + 資料不足 3 個月時記 `NULL`），
+    用 `tmp_path` 造假 `monthly_revenue` 表，不碰真實 db。
+  - 怎麼重跑：`python build_valuation.py --screen`（`monthly_revenue` 本身由
+    `build_revenue_history.py` 維護，不需要額外重跑）。
+  - **2026-09-04 run_date 快照結果**（273 列，跑 `--screen` 當下 `monthly_revenue`
+    最新到 2026-07/08）：
+    - `semiconductor` ∩ `ai_chain` 兩個 universe「低於合理區間且 band_ok=1」分別
+      15 檔／6 檔（`ai_chain` 的緯穎/緯創/技嘉/廣達/神達同時也在 `semiconductor`
+      universe 但 sub 標籤不同，兩邊都列，此次剛好半導體/AI 主鏈側清單不重疊，因為
+      這幾檔在 semiconductor universe 查無 `stock_sub_industry` 節點而不在半導體
+      universe 名單內）；完整清單見下方或用
+      `SELECT * FROM valuation_screen WHERE run_date='2026-09-04' AND universe=? AND
+      category='低於合理區間' AND band_ok=1 ORDER BY position` 查詢重現。
+    - 全體 `rev_eps_diverge=1`：3 檔，皆落在 `semiconductor`／IC設計——
+      2458 義隆（pos=-0.639, eps_g=0.408, rev3m=-0.155）、
+      3438 類比科（pos=-0.070, eps_g=1.129, rev3m=-0.167）、
+      5269 祥碩（pos=-0.190, eps_g=0.638, rev3m=-0.271）。
+    - `rev_ym_latest` 分布：202608=47 檔、202607=206 檔、`NULL`（查無 `monthly_revenue`
+      資料）=20 檔；`rev_yoy_3m` 為 `NULL` 的有 20 檔（跟 `rev_ym_latest=NULL` 同一批，
+      皆為 `monthly_revenue` 完全沒有資料的個股，非計算錯誤）。

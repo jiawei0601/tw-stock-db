@@ -119,7 +119,9 @@ python build_valuation.py --import-cache <cache.json> [--import-cache <another.j
   `split_flag`、`band_ok`），寫入 `valuation_screen`。**`split_flag=True` 時 `band_ok`
   一律強制 `False`**——緯穎（6669）2026-09-02 一拆三（收盤價 7800→2610）是本輪新增的
   已知盲點修正，原 `ai_valuation_v2.py` 完全沒有分割偵測、`semi_screen.py` 雖有偵測但
-  只套用在半導體 universe，本腳本統一套用到兩個 universe。
+  只套用在半導體 universe，本腳本統一套用到兩個 universe。**【2026-09-07】** 同時從
+  `monthly_revenue` 算營收 vs EPS 背離四欄（`rev_ym_latest`／`rev_yoy_3m`／
+  `rev_yoy_ytd`／`rev_eps_diverge`，定義見 HANDOFF.md），純本地運算不打 FinMind API。
 
 ## 子產業分類（build_sub_industry.py）
 

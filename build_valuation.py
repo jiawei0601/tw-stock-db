@@ -104,6 +104,11 @@ CREATE TABLE IF NOT EXISTS valuation_screen (
     category         TEXT,
     sub_multi        INTEGER NOT NULL DEFAULT 0,  -- 【2026-09-07】該股票在 stock_sub_industry
                                                    -- 有多列（跨節點重疊），sub 只取第一列代表值
+    rev_ym_latest    TEXT,             -- 【2026-09-07】monthly_revenue 最新月份，格式 YYYYMM
+    rev_yoy_3m       REAL,             -- 最近 3 個月營收合計年增率（小數，加總不取平均）
+    rev_yoy_ytd      REAL,             -- 最新月 cumulative_yoy_pct 換算成小數
+    rev_eps_diverge  INTEGER NOT NULL DEFAULT 0,  -- 營收轉負但 EPS 仍在成長頂點：
+                                                   -- rev_yoy_3m<-0.10 且 eps_ttm_growth>0.20
     PRIMARY KEY (run_date, stock_id, universe)
 );
 """
@@ -124,6 +129,17 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE valuation_screen ADD COLUMN sub_multi INTEGER NOT NULL DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+    # 【2026-09-07】營收 vs EPS 背離四欄，比照 sub_multi 的冪等 ALTER TABLE 補欄位模式。
+    for col_sql in (
+        "ALTER TABLE valuation_screen ADD COLUMN rev_ym_latest TEXT",
+        "ALTER TABLE valuation_screen ADD COLUMN rev_yoy_3m REAL",
+        "ALTER TABLE valuation_screen ADD COLUMN rev_yoy_ytd REAL",
+        "ALTER TABLE valuation_screen ADD COLUMN rev_eps_diverge INTEGER NOT NULL DEFAULT 0",
+    ):
+        try:
+            conn.execute(col_sql)
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     return conn
 
@@ -460,6 +476,50 @@ def _detect_split_flag(prices_sorted: list[tuple[str, float]]) -> bool:
     return False
 
 
+def _revenue_metrics(conn: sqlite3.Connection, sid: str, eps_ttm_growth: float | None) -> dict:
+    """從 monthly_revenue 算營收 vs EPS 背離四欄（純本地運算，不打 FinMind API）。
+
+    - rev_ym_latest：最新月份，DB 存 'YYYY-MM'，輸出轉成 'YYYYMM'。
+    - rev_yoy_3m：最近 3 個月 revenue 合計 / 去年同 3 個月 revenue_last_year_month 合計 − 1
+      （用金額加總，不對 yoy_pct 取平均）；不足 3 個月或任一月缺 revenue_last_year_month
+      記 None。
+    - rev_yoy_ytd：最新月 cumulative_yoy_pct（DB 存百分比數字，如 37.01）換算成小數。
+    - rev_eps_diverge：rev_yoy_3m < -0.10 且 eps_ttm_growth > 0.20 → 1，否則 0。
+    """
+    rows = conn.execute(
+        "SELECT ym, revenue, revenue_last_year_month, cumulative_yoy_pct "
+        "FROM monthly_revenue WHERE stock_id = ? ORDER BY ym",
+        (sid,),
+    ).fetchall()
+    if not rows:
+        return {
+            "rev_ym_latest": None, "rev_yoy_3m": None, "rev_yoy_ytd": None,
+            "rev_eps_diverge": 0,
+        }
+
+    latest_ym, _, _, latest_cum_yoy = rows[-1]
+    rev_ym_latest = latest_ym.replace("-", "") if latest_ym else None
+    rev_yoy_ytd = (latest_cum_yoy / 100.0) if latest_cum_yoy is not None else None
+
+    last3 = rows[-3:]
+    if len(last3) == 3 and all(r[1] is not None and r[2] is not None for r in last3):
+        cur_sum = sum(r[1] for r in last3)
+        prev_sum = sum(r[2] for r in last3)
+        rev_yoy_3m = (cur_sum / prev_sum - 1) if prev_sum > 0 else None
+    else:
+        rev_yoy_3m = None
+
+    rev_eps_diverge = int(
+        rev_yoy_3m is not None and rev_yoy_3m < -0.10
+        and eps_ttm_growth is not None and eps_ttm_growth > 0.20
+    )
+
+    return {
+        "rev_ym_latest": rev_ym_latest, "rev_yoy_3m": rev_yoy_3m,
+        "rev_yoy_ytd": rev_yoy_ytd, "rev_eps_diverge": rev_eps_diverge,
+    }
+
+
 def _screen_one(conn: sqlite3.Connection, sid: str, name: str, universe: str, sub: str, sub_multi: bool = False) -> dict | None:
     per_rows = conn.execute(
         "SELECT date, per, pbr, dividend_yield FROM per_daily WHERE stock_id = ? ORDER BY date", (sid,)
@@ -548,6 +608,8 @@ def _screen_one(conn: sqlite3.Connection, sid: str, name: str, universe: str, su
     if n_eps_q < 8:
         reasons.append(f"EPS僅{n_eps_q}季")
 
+    rev_metrics = _revenue_metrics(conn, sid, eps_ttm_growth)
+
     return {
         "stock_id": sid, "name": name, "universe": universe, "sub": sub,
         "price": cur_price, "per": cur_per, "per_p25": p25, "per_p50": p50, "per_p75": p75,
@@ -559,6 +621,7 @@ def _screen_one(conn: sqlite3.Connection, sid: str, name: str, universe: str, su
         "split_flag": split_flag, "band_ok": band_ok,
         "not_ok_reason": "；".join(reasons) if reasons else None,
         "category": category, "last_date": last_date, "sub_multi": sub_multi,
+        **rev_metrics,
     }
 
 
@@ -590,8 +653,8 @@ def screen(conn: sqlite3.Connection) -> dict:
                 per_p25, per_p50, per_p75, position, fair_low, fair_high,
                 pbr, pbr_p25, pbr_p75, dividend_yield, per_points, eps_quarters,
                 eps_cv, loss_q, eps_ttm_growth, split_flag, band_ok, not_ok_reason, category,
-                sub_multi
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                sub_multi, rev_ym_latest, rev_yoy_3m, rev_yoy_ytd, rev_eps_diverge
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_date, r["stock_id"], r["name"], r["universe"], r["sub"], r["price"], r["per"],
@@ -599,6 +662,7 @@ def screen(conn: sqlite3.Connection) -> dict:
                 r["pbr"], r["pbr_p25"], r["pbr_p75"], r["dividend_yield"], r["per_points"], r["eps_quarters"],
                 r["eps_cv"], r["loss_q"], r["eps_ttm_growth"], int(r["split_flag"]), int(r["band_ok"]),
                 r["not_ok_reason"], r["category"], int(r["sub_multi"]),
+                r["rev_ym_latest"], r["rev_yoy_3m"], r["rev_yoy_ytd"], int(r["rev_eps_diverge"]),
             ),
         )
     conn.commit()

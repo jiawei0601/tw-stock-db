@@ -108,3 +108,93 @@ def test_band_ok_false_when_split_flag_true():
     split_flag = True
     band_ok = (eps_cv < 0.5) and (loss_q == 0) and (n_per >= 300) and (n_eps_q == 8) and not split_flag
     assert band_ok is False
+
+
+# ---- 【2026-09-07】營收 vs EPS 背離四欄 ----
+
+def test_valuation_screen_has_revenue_divergence_columns(conn):
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(valuation_screen)").fetchall()}
+    for c in ("rev_ym_latest", "rev_yoy_3m", "rev_yoy_ytd", "rev_eps_diverge"):
+        assert c in cols, f"valuation_screen 缺少欄位 {c}"
+
+
+def test_revenue_metrics_yoy_3m_formula(tmp_path):
+    """rev_yoy_3m 用金額加總算，不是對 yoy_pct 取平均。"""
+    db_path = tmp_path / "fake.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE monthly_revenue (stock_id TEXT, ym TEXT, revenue INTEGER, "
+        "revenue_last_year_month INTEGER, yoy_pct REAL, revenue_cumulative INTEGER, "
+        "cumulative_yoy_pct REAL)"
+    )
+    # 3 個月：今年合計 330、去年合計 300 -> yoy = 330/300 - 1 = 0.10
+    rows = [
+        ("2026-05", 100, 90),
+        ("2026-06", 110, 100),
+        ("2026-07", 120, 110),
+    ]
+    for ym, cur, last in rows:
+        conn.execute(
+            "INSERT INTO monthly_revenue (stock_id, ym, revenue, revenue_last_year_month, "
+            "yoy_pct, revenue_cumulative, cumulative_yoy_pct) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("9999", ym, cur, last, (cur / last - 1) * 100, cur, 12.34),
+        )
+    conn.commit()
+
+    result = bv._revenue_metrics(conn, "9999", eps_ttm_growth=None)
+    assert result["rev_ym_latest"] == "202607"
+    assert result["rev_yoy_3m"] == pytest.approx(330 / 300 - 1)
+    assert result["rev_yoy_ytd"] == pytest.approx(0.1234)
+    assert result["rev_eps_diverge"] == 0
+    conn.close()
+
+
+def test_revenue_metrics_diverge_flag(tmp_path):
+    """rev_yoy_3m < -0.10 且 eps_ttm_growth > 0.20 -> rev_eps_diverge=1。"""
+    db_path = tmp_path / "fake2.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE monthly_revenue (stock_id TEXT, ym TEXT, revenue INTEGER, "
+        "revenue_last_year_month INTEGER, yoy_pct REAL, revenue_cumulative INTEGER, "
+        "cumulative_yoy_pct REAL)"
+    )
+    # 今年合計 240、去年合計 300 -> yoy = 240/300 - 1 = -0.20（< -0.10）
+    rows = [
+        ("2026-05", 80, 100),
+        ("2026-06", 80, 100),
+        ("2026-07", 80, 100),
+    ]
+    for ym, cur, last in rows:
+        conn.execute(
+            "INSERT INTO monthly_revenue (stock_id, ym, revenue, revenue_last_year_month, "
+            "yoy_pct, revenue_cumulative, cumulative_yoy_pct) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("8888", ym, cur, last, (cur / last - 1) * 100, cur, -20.0),
+        )
+    conn.commit()
+
+    result = bv._revenue_metrics(conn, "8888", eps_ttm_growth=0.25)  # EPS 仍成長 25%
+    assert result["rev_yoy_3m"] == pytest.approx(-0.20)
+    assert result["rev_eps_diverge"] == 1
+
+    # EPS 沒有仍在頂 -> 不應標記
+    result2 = bv._revenue_metrics(conn, "8888", eps_ttm_growth=0.05)
+    assert result2["rev_eps_diverge"] == 0
+    conn.close()
+
+
+def test_revenue_metrics_insufficient_months_is_none(tmp_path):
+    db_path = tmp_path / "fake3.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE monthly_revenue (stock_id TEXT, ym TEXT, revenue INTEGER, "
+        "revenue_last_year_month INTEGER, yoy_pct REAL, revenue_cumulative INTEGER, "
+        "cumulative_yoy_pct REAL)"
+    )
+    conn.execute(
+        "INSERT INTO monthly_revenue VALUES ('7777', '2026-07', 100, 90, 11.1, 100, 5.0)"
+    )
+    conn.commit()
+    result = bv._revenue_metrics(conn, "7777", eps_ttm_growth=0.5)
+    assert result["rev_yoy_3m"] is None
+    assert result["rev_eps_diverge"] == 0
+    conn.close()
