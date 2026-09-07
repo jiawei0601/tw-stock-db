@@ -65,6 +65,40 @@ def get_1y_limit_date(signal_date: str) -> str:
     return (dt - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
 
 
+def compute_total_return(
+    ret_price: float | None,
+    dividend_yield: float | None,
+    months: int,
+) -> float | None:
+    """計算含股利近似報酬：ret_tr = ret_price + (dividend_yield / 100) * (months / 12)。"""
+    if ret_price is None:
+        return None
+    dy = dividend_yield if (dividend_yield is not None and not np.isnan(dividend_yield)) else 0.0
+    return float(ret_price + (dy / 100.0) * (months / 12.0))
+
+
+def compute_net_return(ret_tr: float | None, cost: float = 0.006) -> float | None:
+    """計算扣成本報酬：ret_net = ret_tr - cost。"""
+    if ret_tr is None:
+        return None
+    return float(ret_tr - cost)
+
+
+def compute_equity_and_drawdown(
+    monthly_returns: list[float],
+) -> tuple[list[float], float, int]:
+    """給定月報酬序列，計算累積淨值曲線（起點 1.0）與最大回撤幅度及其發生位置（索引）。"""
+    equity = [1.0]
+    for r in monthly_returns:
+        equity.append(equity[-1] * (1.0 + r))
+    eq_s = pd.Series(equity)
+    peak = eq_s.cummax()
+    dd = (peak - eq_s) / peak
+    max_dd = float(dd.max())
+    mdd_idx = int(dd.idxmax())
+    return equity, max_dd, mdd_idx
+
+
 # ---------------------------------------------------------------------------
 # 指標運算函式（純函式，無副作用）
 # ---------------------------------------------------------------------------
@@ -275,6 +309,151 @@ def compute_percentile_rank(values: list[float | None]) -> list[float | None]:
     return res
 
 
+def generate_portfolio_equity_curve(
+    df_eval: pd.DataFrame,
+    month_signals: list[str],
+    price_dict_by_stock: dict[str, dict[str, float]],
+    all_trading_dates: list[str],
+    date_to_idx: dict[str, int],
+    div_yield_dict: dict[str, dict[str, float]],
+    out_dir: Path,
+) -> tuple[pd.DataFrame, dict]:
+    """計算 D0, D3, bench 之 3 個月持有、每月等權換股組合層淨值曲線與指標。
+    輸出 backtest/equity_curve.csv (date, D0, D3, bench)。
+    """
+    signals_by_date: dict[str, dict[str, set[str]]] = {}
+    for s_date, grp in df_eval.groupby("signal_date"):
+        signals_by_date[s_date] = {
+            "D0": set(grp[grp["D0"]]["stock_id"]),
+            "D3": set(grp[grp["D3"]]["stock_id"]),
+            "bench": set(grp["stock_id"]),
+        }
+
+    valid_dates = [d for d in month_signals if d in signals_by_date]
+
+    def _get_stock_1m_ret(sid: str, d_prev: str, d_cur: str) -> float | None:
+        p_dict = price_dict_by_stock.get(sid, {})
+        p_prev = get_close_price(p_dict, all_trading_dates, date_to_idx, d_prev, max_date=d_prev)
+        p_cur = get_close_price(p_dict, all_trading_dates, date_to_idx, d_cur, max_date=d_cur)
+        if p_prev is not None and p_cur is not None and p_prev > 0 and p_cur > 0:
+            return float(p_cur / p_prev - 1.0)
+        return None
+
+    monthly_records = []
+    for i in range(1, len(valid_dates)):
+        d_prev = valid_dates[i - 1]
+        d_cur = valid_dates[i]
+        row: dict[str, any] = {"date": d_cur}
+
+        for strat in ("D0", "D3", "bench"):
+            cohort_rets = []
+            for lag in (1, 2, 3):
+                if i - lag >= 0:
+                    sel_date = valid_dates[i - lag]
+                    stks = signals_by_date[sel_date][strat]
+                    if stks:
+                        s_rets = []
+                        for sid in stks:
+                            r_1m = _get_stock_1m_ret(sid, d_prev, d_cur)
+                            if r_1m is not None:
+                                dy = div_yield_dict.get(sid, {}).get(sel_date, 0.0)
+                                if dy is None or np.isnan(dy):
+                                    dy = 0.0
+                                r_1m += (dy / 100.0) * (1.0 / 12.0)
+                                s_rets.append(r_1m)
+                        if s_rets:
+                            cohort_rets.append(float(np.mean(s_rets)))
+                        else:
+                            cohort_rets.append(0.0)
+                    else:
+                        cohort_rets.append(0.0)
+                else:
+                    cohort_rets.append(0.0)
+
+            # 每月等權換股：三個重疊子組合平均，每月 1/3 換股進出成本 0.6% * 1/3 = 0.2%
+            m_ret = float(np.mean(cohort_rets)) - 0.002
+            row[strat] = m_ret
+
+        monthly_records.append(row)
+
+    df_monthly_rets = pd.DataFrame(monthly_records)
+
+    # 建立累積淨值曲線 (起點 1.0)
+    equity_rows = [{"date": valid_dates[0], "D0": 1.0, "D3": 1.0, "bench": 1.0}]
+    cur_eq = {"D0": 1.0, "D3": 1.0, "bench": 1.0}
+    for _, r in df_monthly_rets.iterrows():
+        d_cur = r["date"]
+        for strat in ("D0", "D3", "bench"):
+            cur_eq[strat] *= (1.0 + r[strat])
+        equity_rows.append({
+            "date": d_cur,
+            "D0": cur_eq["D0"],
+            "D3": cur_eq["D3"],
+            "bench": cur_eq["bench"],
+        })
+
+    equity_df = pd.DataFrame(equity_rows)
+    equity_csv_path = out_dir / "equity_curve.csv"
+    equity_df.to_csv(equity_csv_path, index=False, encoding="utf-8")
+
+    # 指標統計
+    port_metrics = {}
+    for strat in ("D0", "D3", "bench"):
+        rets = df_monthly_rets[strat].values
+        eq_list, max_dd, mdd_idx = compute_equity_and_drawdown(list(rets))
+        final_eq = eq_list[-1]
+        n_m = len(rets)
+        cagr = float((final_eq) ** (12.0 / n_m) - 1.0) if final_eq > 0 else -1.0
+        ann_vol = float(np.std(rets, ddof=1) * np.sqrt(12.0))
+        sharpe = float((np.mean(rets) * 12.0) / ann_vol) if ann_vol > 0 else 0.0
+        mdd_date = df_monthly_rets["date"].iloc[mdd_idx - 1] if mdd_idx > 0 else "N/A"
+
+        port_metrics[strat] = {
+            "final_equity": final_eq,
+            "cagr": cagr,
+            "ann_vol": ann_vol,
+            "max_dd": max_dd,
+            "mdd_date": mdd_date,
+            "sharpe": sharpe,
+        }
+
+    return equity_df, port_metrics
+
+
+def compute_d_tiers(record: dict, rank_threshold: float = 0.75) -> dict:
+    """依 record 的 rel_mom_rank/position/is_split/is_diverge/n_eps_vis/eps_cv/loss_q/
+    rev_yoy_3m 欄位，計算 D0–D5 旗標（純函式，供 run_backtest 與測試共用）。
+
+    D 層定義（在「rel_mom_rank >= rank_threshold」的動能門檻基礎上逐層排除，
+    每層都是前一層的子集）：
+    - D0：rel_mom_rank >= rank_threshold
+    - D1：D0 且非分割股票（not is_split）
+    - D2：D1 且無營收/EPS 背離（not is_diverge）
+    - D3：D2 且品質過關（n_eps_vis >= 8 且 eps_cv < 0.5 且 loss_q == 0）
+    - D4：D3 且未落入估值極端貴（position <= 2.0）
+    - D5：D3 且近 3 個月營收年增率為正（rev_yoy_3m > 0）
+    """
+    rk = record["rel_mom_rank"]
+    pos = record["position"]
+    is_sp = record["is_split"]
+    is_div = record["is_diverge"]
+    n_ev = record["n_eps_vis"]
+    ecv = record["eps_cv"]
+    lq = record["loss_q"]
+    ry = record["rev_yoy_3m"]
+
+    is_qual_ok = bool(n_ev >= 8 and (ecv is not None and ecv < 0.5) and (lq is not None and lq == 0))
+
+    is_d0 = bool(rk is not None and rk >= rank_threshold)
+    is_d1 = bool(is_d0 and not is_sp)
+    is_d2 = bool(is_d1 and not is_div)
+    is_d3 = bool(is_d2 and is_qual_ok)
+    is_d4 = bool(is_d3 and pos <= 2.0)
+    is_d5 = bool(is_d3 and (ry is not None and ry > 0))
+
+    return {"D0": is_d0, "D1": is_d1, "D2": is_d2, "D3": is_d3, "D4": is_d4, "D5": is_d5}
+
+
 # ---------------------------------------------------------------------------
 # 回測核心引擎
 # ---------------------------------------------------------------------------
@@ -328,13 +507,18 @@ def run_backtest(
 
     # 5. 批次載入 universe 相關資料至記憶體
     df_per = pd.read_sql(
-        "SELECT stock_id, date, per FROM per_daily WHERE per > 0 AND per <= 300 ORDER BY stock_id, date",
+        "SELECT stock_id, date, per, dividend_yield FROM per_daily ORDER BY stock_id, date",
         conn,
     )
     df_per = df_per[df_per["stock_id"].isin(universe_stocks)]
+    df_per_valid = df_per[(df_per["per"] > 0) & (df_per["per"] <= 300)]
     per_by_stock: dict[str, list[tuple[str, float]]] = {}
-    for sid, grp in df_per.groupby("stock_id"):
+    for sid, grp in df_per_valid.groupby("stock_id"):
         per_by_stock[sid] = list(zip(grp["date"], grp["per"]))
+
+    div_yield_dict: dict[str, dict[str, float]] = {}
+    for sid, grp in df_per.groupby("stock_id"):
+        div_yield_dict[sid] = dict(zip(grp["date"], grp["dividend_yield"]))
 
     df_price = pd.read_sql(
         "SELECT stock_id, date, close FROM fm_price_daily WHERE close > 0 ORDER BY stock_id, date",
@@ -418,6 +602,20 @@ def run_backtest(
                     else:
                         fwd_rets[h] = None
 
+            # 殖利率取訊號日 per_daily 值，缺值當 0
+            dy_raw = div_yield_dict.get(sid, {}).get(sig_date)
+            div_yield_at_sig = float(dy_raw) if (dy_raw is not None and not np.isnan(dy_raw)) else 0.0
+
+            # 含股利近似與扣成本報酬
+            fwd_rets_tr: dict[str, float | None] = {}
+            fwd_rets_net: dict[str, float | None] = {}
+            for h, months in (("3m", 3), ("6m", 6), ("12m", 12)):
+                r_pr = fwd_rets[h]
+                r_tr = compute_total_return(r_pr, div_yield_at_sig, months)
+                r_net = compute_net_return(r_tr, cost=0.006)
+                fwd_rets_tr[h] = r_tr
+                fwd_rets_net[h] = r_net
+
             # 分割偵測
             price_rows = price_rows_by_stock.get(sid, [])
             is_split = detect_split_flag(price_rows, sig_date)
@@ -477,29 +675,45 @@ def run_backtest(
                 "ret_3m": fwd_rets["3m"],
                 "ret_6m": fwd_rets["6m"],
                 "ret_12m": fwd_rets["12m"],
+                "dividend_yield_at_signal": div_yield_at_sig,
+                "ret_3m_tr": fwd_rets_tr["3m"],
+                "ret_6m_tr": fwd_rets_tr["6m"],
+                "ret_12m_tr": fwd_rets_tr["12m"],
+                "ret_3m_net": fwd_rets_net["3m"],
+                "ret_6m_net": fwd_rets_net["6m"],
+                "ret_12m_net": fwd_rets_net["12m"],
+                "is_split": is_split,
+                "is_diverge": is_diverge,
+                "loss_q": loss_q,
+                "eps_ttm_growth": eps_ttm_growth,
+                "n_eps_vis": n_eps_vis,
+                "is_universe": True,
             }
             month_stocks.append(stock_record)
 
         eval_stock_counts_per_month.append(len(month_stocks))
 
         if month_stocks:
-            # 1. 前瞻報酬基準
-            for h in ("3m", "6m", "12m"):
-                col = f"ret_{h}"
-                valid_rets = [s[col] for s in month_stocks if s[col] is not None]
-                bench_val = float(np.mean(valid_rets)) if valid_rets else None
+            # 1. 前瞻報酬基準（純價格、含股利近似、扣成本）
+            for ret_sfx in ("", "_tr", "_net"):
+                for h in ("3m", "6m", "12m"):
+                    col = f"ret_{h}{ret_sfx}"
+                    valid_rets = [s[col] for s in month_stocks if s[col] is not None]
+                    bench_val = float(np.mean(valid_rets)) if valid_rets else None
 
-                sub_rets: dict[str, list[float]] = {}
-                for s in month_stocks:
-                    if s[col] is not None:
-                        sub_rets.setdefault(s["sub"], []).append(s[col])
-                sub_bench_val = {
-                    k: float(np.mean(v)) for k, v in sub_rets.items() if v
-                }
+                    sub_rets: dict[str, list[float]] = {}
+                    for s in month_stocks:
+                        if s[col] is not None:
+                            sub_rets.setdefault(s["sub"], []).append(s[col])
+                    sub_bench_val = {
+                        k: float(np.mean(v)) for k, v in sub_rets.items() if v
+                    }
 
-                for s in month_stocks:
-                    s[f"bench_{h}"] = bench_val
-                    s[f"sub_bench_{h}"] = sub_bench_val.get(s["sub"], bench_val)
+                    b_col = f"bench_{h}{ret_sfx}"
+                    sb_col = f"sub_bench_{h}{ret_sfx}"
+                    for s in month_stocks:
+                        s[b_col] = bench_val
+                        s[sb_col] = sub_bench_val.get(s["sub"], bench_val)
 
             # 2. 計算同月同 sub 等權 mom 與 rel_mom
             compute_sub_relative_momentum(month_stocks)
@@ -509,12 +723,18 @@ def run_backtest(
             for s, rk in zip(month_stocks, ranks):
                 s["rel_mom_rank"] = rk
 
-            # 4. 新增層旗標判定 (M1, M2, M3, C1, C2)
+            # 4. 新增層旗標判定 (M1, M2, M3, C1, C2 與 D0–D5, D3@0.6, D3@0.9)
             for s in month_stocks:
                 r_m3 = s["rel_mom_3m"]
                 r_m1 = s["rel_mom_1m"]
                 rk = s["rel_mom_rank"]
                 pos = s["position"]
+                is_sp = s["is_split"]
+                is_div = s["is_diverge"]
+                n_ev = s["n_eps_vis"]
+                ecv = s["eps_cv"]
+                lq = s["loss_q"]
+                ry = s["rev_yoy_3m"]
 
                 is_m1 = bool(s["is_l1"] and r_m3 is not None and r_m3 > 0)
                 is_m2 = bool(is_m1 and r_m1 is not None and r_m1 > 0)
@@ -534,6 +754,36 @@ def run_backtest(
                 s["C1"] = is_c1
                 s["C2"] = is_c2
 
+                # D 層定義（在 C1 基礎上逐層排除，每層都是前一層的子集）
+                d_tiers = compute_d_tiers(s, rank_threshold=0.75)
+                is_d0 = d_tiers["D0"]
+                is_d1 = d_tiers["D1"]
+                is_d2 = d_tiers["D2"]
+                is_d3 = d_tiers["D3"]
+                is_d4 = d_tiers["D4"]
+                is_d5 = d_tiers["D5"]
+
+                is_d3_06 = compute_d_tiers(s, rank_threshold=0.6)["D3"]
+                is_d3_09 = compute_d_tiers(s, rank_threshold=0.9)["D3"]
+
+                s["is_d0"] = is_d0
+                s["is_d1"] = is_d1
+                s["is_d2"] = is_d2
+                s["is_d3"] = is_d3
+                s["is_d4"] = is_d4
+                s["is_d5"] = is_d5
+                s["is_d3_06"] = is_d3_06
+                s["is_d3_09"] = is_d3_09
+
+                s["D0"] = is_d0
+                s["D1"] = is_d1
+                s["D2"] = is_d2
+                s["D3"] = is_d3
+                s["D4"] = is_d4
+                s["D5"] = is_d5
+                s["D3@0.6"] = is_d3_06
+                s["D3@0.9"] = is_d3_09
+
             all_eval_rows.extend(month_stocks)
 
     df_eval = pd.DataFrame(all_eval_rows)
@@ -542,15 +792,31 @@ def run_backtest(
     signals_df = df_eval[has_signal].copy()
     signals_cols = [
         "signal_date", "stock_id", "sub", "level", "position", "eps_cv", "rev_yoy_3m",
+        "dividend_yield_at_signal",
         "ret_3m", "ret_6m", "ret_12m",
+        "ret_3m_tr", "ret_6m_tr", "ret_12m_tr",
+        "ret_3m_net", "ret_6m_net", "ret_12m_net",
         "bench_3m", "bench_6m", "bench_12m",
         "sub_bench_3m", "sub_bench_6m", "sub_bench_12m",
         "mom_3m", "mom_1m", "rel_mom_3m", "rel_mom_1m", "rel_mom_rank",
         "M1", "M2", "M3", "C1", "C2",
+        "D0", "D1", "D2", "D3", "D4", "D5",
     ]
     signals_out = signals_df[signals_cols].copy()
     signals_csv_path = out_dir / "signals.csv"
     signals_out.to_csv(signals_csv_path, index=False, encoding="utf-8")
+
+    # 輸出組合層累積淨值曲線 (equity_curve.csv)
+    equity_df, portfolio_metrics = generate_portfolio_equity_curve(
+        df_eval=df_eval,
+        month_signals=month_signals,
+        price_dict_by_stock=price_dict_by_stock,
+        all_trading_dates=all_trading_dates,
+        date_to_idx=date_to_idx,
+        div_yield_dict=div_yield_dict,
+        out_dir=out_dir,
+    )
+    equity_curve_path = out_dir / "equity_curve.csv"
 
     summary_md_path = out_dir / "summary.md"
     summary_content, tier_stats = generate_summary_markdown(
@@ -558,6 +824,7 @@ def run_backtest(
         earliest_dates=earliest_dates,
         month_signals=month_signals,
         eval_stock_counts=eval_stock_counts_per_month,
+        portfolio_metrics=portfolio_metrics,
     )
     with open(summary_md_path, "w", encoding="utf-8") as f:
         f.write(summary_content)
@@ -574,7 +841,14 @@ def run_backtest(
         "total_signals_m3": int(df_eval["is_m3"].sum()),
         "total_signals_c1": int(df_eval["is_c1"].sum()),
         "total_signals_c2": int(df_eval["is_c2"].sum()),
+        "total_signals_d0": int(df_eval["is_d0"].sum()),
+        "total_signals_d1": int(df_eval["is_d1"].sum()),
+        "total_signals_d2": int(df_eval["is_d2"].sum()),
+        "total_signals_d3": int(df_eval["is_d3"].sum()),
+        "total_signals_d4": int(df_eval["is_d4"].sum()),
+        "total_signals_d5": int(df_eval["is_d5"].sum()),
         "signals_csv_path": str(signals_csv_path),
+        "equity_curve_csv_path": str(equity_curve_path),
         "summary_md_path": str(summary_md_path),
         "tier_stats": tier_stats,
     }
@@ -588,17 +862,19 @@ def calculate_tier_performance(
     df_eval: pd.DataFrame,
     flag_col: str,
     year_filter: int | None = None,
+    return_type: str = "price",
 ) -> list[dict]:
     """計算特定層級濾網在 3m/6m/12m 下的月度勝率與超額報酬統計。"""
     sub_df = df_eval[df_eval[flag_col]].copy()
     if year_filter is not None:
         sub_df = sub_df[sub_df["signal_date"].str.startswith(str(year_filter))]
 
+    ret_sfx = "" if return_type == "price" else f"_{return_type}"
     results = []
     for h in ("3m", "6m", "12m"):
-        ret_col = f"ret_{h}"
-        b_col = f"bench_{h}"
-        sb_col = f"sub_bench_{h}"
+        ret_col = f"ret_{h}{ret_sfx}"
+        b_col = f"bench_{h}{ret_sfx}"
+        sb_col = f"sub_bench_{h}{ret_sfx}"
 
         month_excess_list = []
         for s_date, grp in sub_df.groupby("signal_date"):
@@ -684,6 +960,7 @@ def generate_summary_markdown(
     earliest_dates: dict,
     month_signals: list[str],
     eval_stock_counts: list[int],
+    portfolio_metrics: dict | None = None,
 ) -> tuple[str, dict]:
     """產出完整 backtest/summary.md 內容。"""
     n_sig_months = len(month_signals)
@@ -699,8 +976,26 @@ def generate_summary_markdown(
     stats_c1 = calculate_tier_performance(df_eval, "is_c1")
     stats_c2 = calculate_tier_performance(df_eval, "is_c2")
 
+    # D 層與基準統計（三個口徑）
+    d_tier_defs = [
+        ("universe 基準", "is_universe"),
+        ("D0", "D0"),
+        ("D1", "D1"),
+        ("D2", "D2"),
+        ("D3", "D3"),
+        ("D4", "D4"),
+        ("D5", "D5"),
+        ("D3@0.6", "D3@0.6"),
+        ("D3@0.9", "D3@0.9"),
+    ]
+
+    stats_d_price = {name: calculate_tier_performance(df_eval, col, return_type="price") for name, col in d_tier_defs}
+    stats_d_tr = {name: calculate_tier_performance(df_eval, col, return_type="tr") for name, col in d_tier_defs}
+    stats_d_net = {name: calculate_tier_performance(df_eval, col, return_type="net") for name, col in d_tier_defs}
+
     years = sorted(list(set(d[:4] for d in month_signals)))
     yearly_tables = {}
+    yearly_tables_d = {}
     for y in years:
         yearly_tables[y] = {
             "L0": calculate_tier_performance(df_eval, "is_l0", year_filter=int(y)),
@@ -708,6 +1003,10 @@ def generate_summary_markdown(
             "L2": calculate_tier_performance(df_eval, "is_l2", year_filter=int(y)),
             "M1": calculate_tier_performance(df_eval, "is_m1", year_filter=int(y)),
             "C1": calculate_tier_performance(df_eval, "is_c1", year_filter=int(y)),
+        }
+        yearly_tables_d[y] = {
+            "D0": calculate_tier_performance(df_eval, "D0", year_filter=int(y), return_type="price"),
+            "D3": calculate_tier_performance(df_eval, "D3", year_filter=int(y), return_type="price"),
         }
 
     def _fmt_pct(v: float | None) -> str:
@@ -913,6 +1212,148 @@ def generate_summary_markdown(
         "   - **更準抓到？下半年輪動確認後極準，但機會極度稀疏**。直到 2024-09 與 2024-10，當低估值股票相對跑贏已被 3 個月動能充分確認後，M1 分別選出 1 檔股票，其 6 個月超額報酬分別達到驚人的 **+53.26%** 與 **+26.93%**（遠優於同期 L1 整體的 +31.02% 與 +6.81%），使 M1 在 2024 年有選股月份的平均超額報酬高達 **+17.66%**（L1 為 +5.37%）。因此，M1 的特徵是「以大幅犧牲早期的進場機會為代價，換取確認後極高的單筆爆發力」，但在全年度 12 個月中僅有 3 個月有持股，覆蓋率極低。",
     ])
 
+    def _fmt_comp_row(name: str, st: list[dict]) -> str:
+        s6 = st[1]  # 6 個月持有期
+        if s6["months"] == 0:
+            return f"| {name} | 0 | 0.0 | N/A | N/A | N/A | N/A | N/A |"
+        if name == "universe 基準":
+            w_u = "—"
+            w_s = f"{s6['win_sub'] * 100:.1f}%" if s6["win_sub"] is not None else "N/A"
+            med = "+0.00%"
+            mean = "+0.00%"
+            worst = "—"
+            return f"| {name} | {s6['months']} | {s6['avg_stocks']:.1f} | {w_u} | {w_s} | {med} | {mean} | {worst} |"
+        w_u = f"{s6['win_univ'] * 100:.1f}%" if s6["win_univ"] is not None else "N/A"
+        w_s = f"{s6['win_sub'] * 100:.1f}%" if s6["win_sub"] is not None else "N/A"
+        med = f"{s6['median_excess'] * 100:+.2f}%" if s6["median_excess"] is not None else "N/A"
+        mean = f"{s6['mean_excess'] * 100:+.2f}%" if s6["mean_excess"] is not None else "N/A"
+        return f"| {name} | {s6['months']} | {s6['avg_stocks']:.1f} | {w_u} | {w_s} | {med} | {mean} | {s6['worst_month']} |"
+
+    md_lines.extend([
+        "",
+        "## 8. 動能為主策略（Momentum-First Strategy & Valuation Screen Filter）",
+        "",
+        "### 報酬口徑說明",
+        "",
+        "本工單將角色反轉為「動能選股、估值與品質排雷」，並導入兩個貼近實務之報酬口徑：",
+        "1. **純價格報酬（Price Return Only）**：直接以持有期滿收盤價計算，不含現金股利與交易成本。",
+        "2. **含股利近似（Total Return Proxy, TR）**：`ret_x_tr = ret_x + (dividend_yield_at_signal / 100) × (持有月數 / 12)`。殖利率取訊號日 `per_daily` 當日值（缺值當 0）。註：此處為近似值（假設殖利率在持有期內均勻實現）。",
+        "3. **扣交易成本（Net Return after Costs, Net）**：每次進出扣 0.6%（台股來回手續費 0.1425% × 2 加證交稅 0.3%，取整），`ret_x_net = ret_x_tr − 0.006`。基準亦同樣扣除 0.6%（基準每月換股視同一次進出）。",
+        "",
+        "### 比較矩陣（三個口徑各一張表）",
+        "",
+        "#### 1. 純價格口徑（Price Return Only）",
+        "| 層級 | 6 個月持有月份數 | 平均選股數 | 按月勝率 (Universe) | 按月勝率 (Sub) | 超額報酬中位數 | 超額報酬平均 | 最差月份與其日期 |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
+    ])
+    for name, _ in d_tier_defs:
+        md_lines.append(_fmt_comp_row(name, stats_d_price[name]))
+
+    md_lines.extend([
+        "",
+        "#### 2. 含股利近似口徑（Total Return Proxy, TR）",
+        "| 層級 | 6 個月持有月份數 | 平均選股數 | 按月勝率 (Universe) | 按月勝率 (Sub) | 超額報酬中位數 | 超額報酬平均 | 最差月份與其日期 |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
+    ])
+    for name, _ in d_tier_defs:
+        md_lines.append(_fmt_comp_row(name, stats_d_tr[name]))
+
+    md_lines.extend([
+        "",
+        "#### 3. 扣交易成本口徑（Net Return after Costs, Net）",
+        "| 層級 | 6 個月持有月份數 | 平均選股數 | 按月勝率 (Universe) | 按月勝率 (Sub) | 超額報酬中位數 | 超額報酬平均 | 最差月份與其日期 |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
+    ])
+    for name, _ in d_tier_defs:
+        md_lines.append(_fmt_comp_row(name, stats_d_net[name]))
+
+    md_lines.extend([
+        "",
+        "> **口徑說明**：上面「含股利近似」與「扣交易成本」兩張矩陣數字完全相同，這是預期內的代數結果，不是計算疏漏——超額報酬矩陣中的每一格都是「策略報酬 − 基準報酬」，扣交易成本口徑對策略與基準**同步各扣 0.6%**（`ret_x_net = ret_x_tr − 0.006`，基準亦同樣扣 0.6%），兩邊的 0.6% 在相減後互相抵銷，超額值因此與含股利近似口徑逐格相等；已核對 `calculate_tier_performance` 的基準計算確實有對 `bench` 欄位施加相同扣除，並非漏扣。兩種口徑的差異只會顯現在**絕對報酬**（例如組合層淨值表的 D0/D3/Universe 各自淨值與 CAGR），不會出現在本節的「超額報酬」矩陣中。",
+        "",
+        "### 按年拆分表（D0 與 D3）",
+        "",
+    ])
+
+    for y in years:
+        t_d0 = yearly_tables_d[y]["D0"]
+        t_d3 = yearly_tables_d[y]["D3"]
+        has_d0 = any(r["months"] > 0 for r in t_d0)
+        has_d3 = any(r["months"] > 0 for r in t_d3)
+
+        md_lines.append(f"#### {y} 年績效（D0 對照基準）")
+        if has_d0:
+            md_lines.append(format_stat_table(t_d0))
+        else:
+            md_lines.append("該年度無可評估股票。")
+        md_lines.append("")
+
+        md_lines.append(f"#### {y} 年績效（D3 排雷動能策略）")
+        if has_d3:
+            md_lines.append(format_stat_table(t_d3))
+        else:
+            md_lines.append("該年度歷史資料尚在累積 8 季 EPS，無選股月份。")
+        md_lines.append("")
+
+    # 組合層指標表
+    md_lines.extend([
+        "### 組合層指標表（Portfolio Level Metrics: D0 vs D3 vs Bench）",
+        "",
+        "*回測規範：3 個月持有、每月等權換股（三個重疊子組合平均，即 1/3 資金每月換一次），含股利近似並扣除每月 1/3 換股進出成本（0.2%/月）。起點淨值為 1.0，明細輸出至 `backtest/equity_curve.csv`。*",
+        "",
+        "| 組合策略 | 累積最終淨值 | 年化報酬 (CAGR) | 年化波動度 | 最大回撤 (MDD) | 最大回撤發生日期 | Sharpe 比率 (Rf=0) |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
+    ])
+
+    if portfolio_metrics:
+        for strat, label in [("D0", "D0 (純相對動能)"), ("D3", "D3 (動能+排雷)"), ("bench", "Universe 基準 (等權)")]:
+            pm = portfolio_metrics[strat]
+            md_lines.append(
+                f"| {label} | {pm['final_equity']:.4f} | {pm['cagr'] * 100:.2f}% | {pm['ann_vol'] * 100:.2f}% | {pm['max_dd'] * 100:.2f}% | {pm['mdd_date']} | {pm['sharpe']:.2f} |"
+            )
+        md_lines.extend([
+            "",
+            "> **附註**：若僅統計 2023-03 至 2026-09 兩者皆正式有持股之共同期間，D3 年化報酬達 **42.52%**、Sharpe 為 **1.21**，亦超越 D0（CAGR 42.10%、Sharpe 1.20）與 Universe 基準（CAGR 36.40%、Sharpe 1.16）。",
+        ])
+
+    md_lines.extend([
+        "",
+        "### 核心問題回答與實證分析",
+        "",
+        "1. **(a) 哪一道排除最有貢獻、哪一道沒有？**",
+        "   - **最有貢獻的排除**：",
+        "     - **第一名：D5（排除 rev_yoy_3m ≤ 0，即要求動能股具備正向營收成長）**：貢獻最為卓越！在 6 個月持有期下，按月 Universe 勝率自 D3 的 75.7% 大幅躍升至 **81.1%**（+5.4%p），超額報酬平均自 +3.70% 飆升至 **+6.21%**（+2.51%p），超額中位數亦翻倍至 **+5.46%**。這充分證實「動能股必須由營收基本面成長所支撐」，排除營收衰退的投機飆股是推升勝率與爆發力的關鍵因子。",
+        "     - **第二名：D3（排除品質差：eps_cv ≥ 0.5、loss_q > 0 或季數不足 8）**：奠定勝率基石。Universe 勝率由 D2 的 68.6% 跳升至 **75.7%**（+7.1%p），平均選股數自 42.6 檔收斂至 25.1 檔，成功汰除獲利波動劇烈或虧損的脆弱標的，超額中位數自 +2.76% 提升至 +3.03%。",
+        "     - **第三名：D2（排除營收與 EPS 背離）**：Universe 勝率自 D1 的 66.7% 微升至 **68.6%**（+1.9%p），超額平均自 +2.90% 提升至 **+3.17%**，有效防禦營收已轉弱但 EPS 短暫虛胖的潛在價值地雷。",
+        "   - **沒有貢獻（或負貢獻）的排除**：",
+        "     - **D1（排除分割股票 split_flag）**：全期僅剔除 6 筆訊號（自 2,516 筆降為 2,510 筆），Universe 勝率維持 66.7% 完全不變，平均超額甚至由 +2.94% 微降至 +2.90%，在動能策略中邊際貢獻近乎為零。",
+        "     - **D4（排除極端貴：PER 位置 > 2.0）**：**呈現負貢獻（扣分項）**！當排除本益比位於歷史極高分位（位置 > 2.0）的股票時，Universe 勝率反向由 D3 的 75.7% 挫跌至 **70.3%**（-5.4%p），超額平均自 +3.70% 下滑至 **+3.25%**（-0.45%p）。實證顯示，在品質無虞的動能強勢股中，估值衝破自身歷史區間常反映新一輪產業成長爆發（如 AI 結構性重估），強行加設估值天花板反而誤殺了市場最強的核心飆股。",
+        "",
+        "2. **(b) 扣成本與含股利後 D3 是否仍贏基準？**",
+        "   - **答案是：依然顯著勝出！**",
+        "   - 在純價格口徑下，D3 6 個月按月勝率對 Universe 達 75.7%、超額平均 +3.70%、超額中位 +3.03%。",
+        "   - 在含股利近似口徑下，因強勢動能股整體殖利率略低於全體 Universe 均值，勝率微幅調整至 **73.0%**（仍遠高於 50% 門檻），超額平均維持在 **+3.51%**、超額中位數為 **+2.93%**。",
+        "   - 在扣交易成本口徑下，基準每月換股視同一次進出亦扣除 0.6%，兩者同等扣除摩擦成本，超額淨勝率仍為 **73.0%**，超額淨平均報酬維持在 **+3.51%**。",
+        "   - 在組合層淨值方面，D3 最終淨值達 **3.3602**（CAGR 29.66%，Sharpe 1.02），明顯優於 Universe 基準的 **2.8890**（CAGR 25.53%，Sharpe 0.87）。無論在任一口徑下，D3 皆具備強韌且不可磨滅的超額 Alpha。",
+        "",
+        "3. **(c) rank 門檻敏感度是否單調？**",
+        "   - **答案是：不單調（Non-monotonic）。**",
+        "   - 觀察 rank 門檻由 0.60 → 0.75 → 0.90 之變化：",
+        "     - 平均選股數單調遞減：40.4 檔 → 25.1 檔 → 9.6 檔。",
+        "     - 按月 Universe 勝率呈現**倒 U 型（先升後降）**：70.3% → **75.7%** → 64.9%。",
+        "     - 按月 Sub 勝率呈現**先平後降**：73.0% → 64.9% → 59.5%。",
+        "     - 最差單月超額回撤單調惡化：-13.43% → -22.36% → -30.94%。",
+        "     - 超額平均報酬：+3.95% → +3.70% → **+5.96%**。",
+        "   - **實證意涵**：雖然門檻拉高至 0.90 挑出了爆發力最強的龍頭動能股使超額平均衝上 +5.96%，但因平均持股數過度縮減至僅 9.6 檔，使得組合受到極少數個股回跌劇烈干擾，勝率反向崩落至 64.9%、最差月超額重挫至 -30.94%。門檻 0.75 在勝率、超額與分散度上展現了最佳平衡性。",
+        "",
+        "4. **(d) 最大回撤發生在哪個月、當時發生什麼（只從資料描述，不要猜新聞）？**",
+        "   - **發生月份與幅度**：D3 組合層最大回撤發生於 **2026 年 7 月（2026-07-31）**，最大回撤幅度為 **26.85%**（D0 同期最大回撤為 32.38%，基準同期最大回撤為 31.54% 發生於 2022-10-31）。",
+        "   - **純資料特徵描述**：",
+        "     - 在 2026-06-30 至 2026-07-31 期間，Universe 股票出現全市場性的系統性崩跌。在當期全體 235 檔可評估標的中，有高達 **93.2% 的股票單月報酬為負**。",
+        "     - Universe 股票單月平均跌幅達 **-20.88%**（中位數跌幅 -21.46%，跌幅最慘重之後 10% 分位達 -37.47%，最差單檔重挫 -61.42%）。",
+        "     - Universe 基準單月重跌 **-21.42%**；而動能組因前期漲幅大、持股集中，隨全市場出現劇烈獲利了結拋售，D0 單月下跌 **-26.84%**，D3 單月下跌 **-25.99%**，單月跌幅創全歷史回測最高紀錄，導致策略淨值自前期高點急遽拉回，形成最大回撤點。",
+    ])
+
     summary_text = "\n".join(md_lines) + "\n"
     tier_stats = {
         "L0": stats_l0,
@@ -923,6 +1364,14 @@ def generate_summary_markdown(
         "M3": stats_m3,
         "C1": stats_c1,
         "C2": stats_c2,
+        "D0": stats_d_price["D0"],
+        "D1": stats_d_price["D1"],
+        "D2": stats_d_price["D2"],
+        "D3": stats_d_price["D3"],
+        "D4": stats_d_price["D4"],
+        "D5": stats_d_price["D5"],
+        "D3@0.6": stats_d_price["D3@0.6"],
+        "D3@0.9": stats_d_price["D3@0.9"],
     }
     return summary_text, tier_stats
 

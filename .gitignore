@@ -22,3 +22,6 @@ backfill.log
 codex-backfill.log
 backtest/signals.csv
 backtest/run.log
+backtest/t1_signals.csv
+backtest/equity_curve.csv
+codex-design-review.log

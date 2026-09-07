@@ -379,3 +379,132 @@ def test_tier_implication_rules():
             assert is_m2 is False
         if not is_m1:
             assert is_m2 is False
+
+
+# ---------------------------------------------------------------------------
+# (g) 動能為主、估值排雷策略層與報酬口徑測試 (D0–D5、TR、Net、淨值回撤)
+# ---------------------------------------------------------------------------
+
+def test_d_tier_implication_hierarchy():
+    """(a) 驗證 D 層蘊含關係：D5 ⊆ D3 ⊆ D2 ⊆ D1 ⊆ D0 與 D4 ⊆ D3。
+
+    直接呼叫實作內的純函式 bv.compute_d_tiers（run_backtest 的 run loop 呼叫同一函式
+    計算旗標，行為不變），而非另刻一份手工真值表，避免測試與實作邏輯各自漂移。
+    """
+    # (rk, is_split, is_div, qual_ok, position, ry) 覆蓋各層邊界情境
+    test_cases = [
+        # 全過：D0~D5 皆 True（position <= 2.0、ry > 0）
+        (0.80, False, False, True, 1.0, 1.0),
+        # D5 False（ry <= 0），D0~D4 True
+        (0.80, False, False, True, 1.0, -1.0),
+        # D4 False（position > 2.0），D5 True，D0~D3 True
+        (0.80, False, False, True, 2.5, 1.0),
+        # D3~D5 False（品質未過關），D0~D2 True
+        (0.80, False, False, False, 1.0, 1.0),
+        # D2~D5 False（有背離），D0~D1 True
+        (0.80, False, True, True, 1.0, 1.0),
+        # D1~D5 False（分割股票），D0 True
+        (0.80, True, False, True, 1.0, 1.0),
+        # D0~D5 皆 False（排名未達門檻）
+        (0.70, False, False, True, 1.0, 1.0),
+    ]
+
+    for rk, is_sp, is_div, qual_ok, pos, ry in test_cases:
+        record = {
+            "rel_mom_rank": rk,
+            "position": pos,
+            "is_split": is_sp,
+            "is_diverge": is_div,
+            # qual_ok = (n_eps_vis >= 8) and (eps_cv < 0.5) and (loss_q == 0)
+            "n_eps_vis": 8 if qual_ok else 0,
+            "eps_cv": 0.1 if qual_ok else 1.0,
+            "loss_q": 0 if qual_ok else 1,
+            "rev_yoy_3m": ry,
+        }
+        d = bv.compute_d_tiers(record, rank_threshold=0.75)
+        is_d0, is_d1, is_d2, is_d3, is_d4, is_d5 = (
+            d["D0"], d["D1"], d["D2"], d["D3"], d["D4"], d["D5"],
+        )
+
+        # 蘊含關係 1: D5 ⊆ D3
+        if is_d5:
+            assert is_d3 is True, "若 D5 為 True，D3 必須為 True"
+
+        # 蘊含關係 2: D4 ⊆ D3
+        if is_d4:
+            assert is_d3 is True, "若 D4 為 True，D3 必須為 True"
+
+        # 蘊含關係 3: D3 ⊆ D2
+        if is_d3:
+            assert is_d2 is True, "若 D3 為 True，D2 必須為 True"
+
+        # 蘊含關係 4: D2 ⊆ D1
+        if is_d2:
+            assert is_d1 is True, "若 D2 為 True，D1 必須為 True"
+
+        # 蘊含關係 5: D1 ⊆ D0
+        if is_d1:
+            assert is_d0 is True, "若 D1 為 True，D0 必須為 True"
+
+        # D4 的位置排除條件：D4 為 True 時 position 必須 <= 2.0
+        if is_d4:
+            assert pos <= 2.0, "若 D4 為 True，position 必須 <= 2.0"
+        if is_d3 and pos > 2.0:
+            assert is_d4 is False, "position > 2.0 時應被 D4 排除"
+
+        # 逆否命題驗證
+        if not is_d0:
+            assert not is_d1 and not is_d2 and not is_d3 and not is_d4 and not is_d5
+        if not is_d1:
+            assert not is_d2 and not is_d3 and not is_d4 and not is_d5
+        if not is_d2:
+            assert not is_d3 and not is_d4 and not is_d5
+        if not is_d3:
+            assert not is_d4 and not is_d5
+
+
+def test_ret_tr_formula_example():
+    """(b) 驗證 ret_tr 公式一例（殖利率 4%、6 個月 → 加 2 個百分點）。"""
+    ret_price = 0.10  # 假定純價格報酬 +10%
+    dividend_yield = 4.0  # 當日殖利率 4% (年化)
+    months = 6  # 持有 6 個月
+
+    # ret_tr = 0.10 + (4.0 / 100) * (6 / 12) = 0.10 + 0.02 = 0.12 (+12%)
+    ret_tr = bv.compute_total_return(ret_price, dividend_yield, months)
+    assert ret_tr == pytest.approx(0.12)
+    # 驗證增加幅度恰為 2 個百分點 (+0.02)
+    assert (ret_tr - ret_price) == pytest.approx(0.02)
+
+    # 缺值當 0 驗證
+    ret_tr_none_dy = bv.compute_total_return(ret_price, None, months)
+    assert ret_tr_none_dy == pytest.approx(0.10)
+
+
+def test_ret_net_formula_deduction():
+    """(c) 驗證 ret_net 每次進出扣 0.6%。"""
+    ret_tr = 0.12  # 含股利報酬 +12%
+    ret_net = bv.compute_net_return(ret_tr, cost=0.006)
+    # ret_net = 0.12 - 0.006 = 0.114 (+11.4%)
+    assert ret_net == pytest.approx(0.114)
+    # 驗證扣減差額恰為 0.006 (0.6%)
+    assert (ret_tr - ret_net) == pytest.approx(0.006)
+
+
+def test_equity_curve_and_max_drawdown_fake_sequence():
+    """(d) 驗證累積淨值與最大回撤用假序列驗證（例如 [+10%, −20%, +5%] → 最大回撤 20%）。"""
+    # 測試序列：+10%, -20%, +5%
+    # 起點: 1.0
+    # Month 1 (+10%): 1.0 * 1.10 = 1.10 (峰值 1.10, 回撤 0%)
+    # Month 2 (-20%): 1.10 * 0.80 = 0.88 (峰值 1.10, 回撤 (1.10 - 0.88)/1.10 = 0.22/1.10 = 20%)
+    # Month 3 (+5%):  0.88 * 1.05 = 0.924 (峰值 1.10, 回撤 (1.10 - 0.924)/1.10 = 16%)
+    # 最大回撤必為 20.0%，且發生在索引 2 (Month 2)
+    fake_rets = [0.10, -0.20, 0.05]
+    equity, max_dd, mdd_idx = bv.compute_equity_and_drawdown(fake_rets)
+
+    assert len(equity) == 4
+    assert equity[0] == pytest.approx(1.0)
+    assert equity[1] == pytest.approx(1.10)
+    assert equity[2] == pytest.approx(0.88)
+    assert equity[3] == pytest.approx(0.924)
+    assert max_dd == pytest.approx(0.20)
+    assert mdd_idx == 2
