@@ -544,6 +544,26 @@ def _covers_target(existing_earliest: str | None, target_date: str, granularity:
     return existing_earliest <= limit
 
 
+def _month_last_day(ym: str) -> str:
+    """'YYYY-MM' -> 該月最後一天 'YYYY-MM-DD'。"""
+    import calendar
+    y, m = (int(x) for x in ym.split("-"))
+    return f"{y:04d}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}"
+
+
+def _fill_revenue_last_year(conn: sqlite3.Connection) -> int:
+    """FinMind TaiwanStockMonthRevenue 沒有去年同期欄位，用自身表前 12 個月的 revenue 補 revenue_last_year。"""
+    cur = conn.execute(
+        """UPDATE fm_revenue_monthly AS cur SET revenue_last_year = (
+               SELECT prev.revenue FROM fm_revenue_monthly AS prev
+               WHERE prev.stock_id = cur.stock_id
+                 AND prev.ym = printf('%04d-%02d', CAST(substr(cur.ym,1,4) AS INT) - 1, CAST(substr(cur.ym,6,2) AS INT)))
+           WHERE revenue_last_year IS NULL"""
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def _empty_gap_known(conn: sqlite3.Connection, sid: str, dataset: str, gap_start: str) -> bool:
     """valuation_fetch_log 有 status='empty_gap:<gap_start>' 表示這段已確認 FinMind 無資料。"""
     row = conn.execute(
@@ -645,7 +665,10 @@ def backfill_missing(
                 skipped += 1
                 continue
             now = _now_iso()
-            data, err_status = _fetch_finmind(session, dataset, sid, gap_start, token, end_date=gap_end)
+            # FinMind end_date 只接受 YYYY-MM-DD；月資料的 gap_end 是 YYYY-MM，要轉成該月最後一天，
+            # 否則整批回空（2026-09-07 實測 235 檔月營收全部空抓）。
+            api_end = _month_last_day(gap_end) if granularity == "month" else gap_end
+            data, err_status = _fetch_finmind(session, dataset, sid, gap_start, token, end_date=api_end)
             if err_status is not None:
                 status = f"error_{err_status}"
                 conn.execute(
@@ -666,6 +689,8 @@ def backfill_missing(
             conn.commit()
             fetched += 1
             time.sleep(BACKFILL_SLEEP_SECONDS)
+
+    _fill_revenue_last_year(conn)
 
     # 計算 remaining：重新掃一次所有 (股票, dataset) 組合，還沒補到目標日的數量。
     remaining = 0

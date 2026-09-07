@@ -331,3 +331,16 @@ def test_empty_gap_known_skips_refetch(tmp_path):
     assert _empty_gap_known(con, "9999", "TaiwanStockPER", "2021-01-01")
     assert not _empty_gap_known(con, "9999", "TaiwanStockPER", "2020-01-01")
     assert not _empty_gap_known(con, "9999", "TaiwanStockPrice", "2021-01-01")
+
+
+def test_month_last_day_and_revenue_last_year(tmp_path):
+    import sqlite3
+    from build_valuation import _month_last_day, _fill_revenue_last_year
+    assert _month_last_day("2026-09") == "2026-09-30"
+    assert _month_last_day("2024-02") == "2024-02-29"
+    con = sqlite3.connect(tmp_path / "t.db")
+    con.execute("CREATE TABLE fm_revenue_monthly (stock_id TEXT, ym TEXT, revenue REAL, revenue_last_year REAL, PRIMARY KEY(stock_id, ym))")
+    con.executemany("INSERT INTO fm_revenue_monthly VALUES (?,?,?,NULL)", [("1","2025-03",100),("1","2026-03",150),("1","2026-04",160)])
+    _fill_revenue_last_year(con)
+    rows = dict(con.execute("SELECT ym, revenue_last_year FROM fm_revenue_monthly").fetchall())
+    assert rows["2026-03"] == 100 and rows["2025-03"] is None and rows["2026-04"] is None
