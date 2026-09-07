@@ -30,6 +30,11 @@
       全市場只有 cache 涵蓋的子集能算，其餘 155 檔要等 `--fetch` 補資料才會出現在
       screen 結果，band_ok=65（ai_chain 45、semiconductor 20），分類分布：區間內 41、
       低於合理區間 25、高於區間 68。
+    - **2026-09-07 22:30 補抓結果：190/206 檔完成**（FinMind 額度恢復，universe 256 檔
+      per_daily/eps_quarterly 全部補齊、抓取失敗 0 檔；另 16 檔因三年 PER 全為空值
+      （長期虧損股 FinMind 不給 PER）無法算位置而未列入 screen。重跑 `--screen` 後
+      run_date=2026-09-04、273 列、band_ok=123。半導體篩選結果見
+      `analysis/semiconductor-valuation-2026-09-07.md`）。
     - **緯穎（6669）分割盲點**：2026-09-02 一拆三，收盤價 7800→2610（單日跌幅
       ~66.5%），原 `ai_valuation_v2.py` 完全沒有分割偵測，`semi_screen.py` 雖有
       「近 60 交易日單日跳動 >40%」偵測但只套用在半導體 universe（緯穎屬 ai_chain
