@@ -1129,3 +1129,5 @@
     - `rev_ym_latest` 分布：202608=47 檔、202607=206 檔、`NULL`（查無 `monthly_revenue`
       資料）=20 檔；`rev_yoy_3m` 為 `NULL` 的有 20 檔（跟 `rev_ym_latest=NULL` 同一批，
       皆為 `monthly_revenue` 完全沒有資料的個股，非計算錯誤）。
+
+- 2026-09-07 11:45：根目錄 0 byte `tw_stocks.db` 雜檔已刪除（使用者指示）。
