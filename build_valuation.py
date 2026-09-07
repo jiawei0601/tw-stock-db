@@ -102,6 +102,8 @@ CREATE TABLE IF NOT EXISTS valuation_screen (
     band_ok          INTEGER NOT NULL DEFAULT 0,
     not_ok_reason    TEXT,
     category         TEXT,
+    sub_multi        INTEGER NOT NULL DEFAULT 0,  -- 【2026-09-07】該股票在 stock_sub_industry
+                                                   -- 有多列（跨節點重疊），sub 只取第一列代表值
     PRIMARY KEY (run_date, stock_id, universe)
 );
 """
@@ -115,6 +117,13 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.executescript(SCHEMA_SQL)
+    # 【2026-09-07】既有 db 若是舊版建的 valuation_screen（沒有 sub_multi 欄位），
+    # CREATE TABLE IF NOT EXISTS 不會補欄位，這裡用 ALTER TABLE 補上（冪等，欄位已
+    # 存在時吞掉錯誤）。
+    try:
+        conn.execute("ALTER TABLE valuation_screen ADD COLUMN sub_multi INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     return conn
 
@@ -164,52 +173,58 @@ _EXT_GROUPS = {
 _AI_CHAIN_EXCLUDE = {"2412"}
 
 
-def ai_chain_universe() -> dict[str, tuple[str, str]]:
-    """回傳 {stock_id: (name, sub)}，比照 ai_valuation_v2.py 的去重邏輯（AI主鏈優先）。"""
-    universe: dict[str, tuple[str, str]] = {}
+def ai_chain_universe() -> dict[str, tuple[str, str, bool]]:
+    """回傳 {stock_id: (name, sub, sub_multi)}，比照 ai_valuation_v2.py 的去重邏輯
+    （AI主鏈優先）。sub_multi 固定 False（這條 universe 的 sub 本來就是寫死人工標記，
+    沒有「多節點來源」的概念，欄位存在只是跟 semiconductor_universe 的回傳形狀一致，
+    方便 screen() 統一處理）。"""
+    universe: dict[str, tuple[str, str, bool]] = {}
     for sid, name in _AI_MAIN.items():
         if sid in _AI_CHAIN_EXCLUDE:
             continue
-        universe[sid] = (name, "AI主鏈")
+        universe[sid] = (name, "AI主鏈", False)
     for group, stocks in _EXT_GROUPS.items():
         for sid, name in stocks.items():
             if sid in _AI_CHAIN_EXCLUDE:
                 continue
             if sid not in universe:
-                universe[sid] = (name, group)
+                universe[sid] = (name, group, False)
     return universe
 
 
-# ---- 半導體子產業標記（搬自 semi_screen.py，未涵蓋者一律歸「其他」，誠實反映未分類） ----
-SEMI_SUB_MAP = {
-    "2454": "IC設計", "2379": "IC設計", "3034": "IC設計", "3443": "IC設計", "3661": "IC設計",
-    "5274": "IC設計", "6531": "IC設計", "3529": "IC設計", "6414": "IC設計",
-    "6533": "IC設計",
-    "2330": "晶圓代工", "2303": "晶圓代工", "6770": "晶圓代工", "5471": "晶圓代工",
-    "3711": "封測", "2449": "封測", "6239": "封測", "2441": "封測", "6147": "封測", "8064": "封測",
-    "5347": "封測",
-    "2408": "記憶體", "2344": "記憶體", "3006": "記憶體", "8299": "記憶體",
-    "6488": "材料與矽晶圓", "3532": "材料與矽晶圓", "4967": "材料與矽晶圓",
-    "3413": "設備", "6789": "設備", "5443": "設備", "6510": "設備", "3680": "設備", "8039": "設備",
-    "3105": "化合物半導體", "8086": "化合物半導體", "2455": "化合物半導體", "3707": "化合物半導體",
-    "6854": "化合物半導體", "3016": "化合物半導體",
-    "2308": "功率與分離元件", "5425": "功率與分離元件", "3675": "功率與分離元件",
-    "8255": "功率與分離元件", "8261": "功率與分離元件", "6138": "功率與分離元件",
-    "5299": "功率與分離元件", "2481": "功率與分離元件", "8081": "功率與分離元件",
-    "3227": "光電與感測", "3363": "光電與感測",
-    "3702": "通路", "2430": "通路",
-}
+# ---- 半導體子產業標記 ----
+# 【2026-09-07 起】改讀 stock_sub_industry 表（來源：證交所/櫃買產業價值鏈資訊平台
+# https://ic.tpex.org.tw/，見 build_sub_industry.py），取代原本寫死在這裡的
+# SEMI_SUB_MAP dict（人工憑印象填寫、覆蓋率不足且無來源可查證，committee 2026-09-07
+# 評估時發現 147/190 檔落「其他」而汰換）。一檔股票在產業鏈平台可能對應多個節點
+# （見 collectors/industry_chain.py 模組說明），此處固定取第一列（按 node 字母序），
+# 呼叫端用 sub_multi 欄位得知是否有多列被捨棄，不代表該欄位以外的列不存在。
 
 
-def semiconductor_universe(conn: sqlite3.Connection) -> dict[str, tuple[str, str]]:
-    """回傳 {stock_id: (name, sub)}，universe 來源 = stocks 表 industry_name 含
-    「半導體」的上市上櫃全部股票（跟 semi_screen.py 原本用 FinMind TaiwanStockInfo
-    industry_category='半導體業' 篩選同義，改讀本地 stocks 表不用再打 API）。
-    不確定子產業歸屬一律標「其他」，不臆測。"""
+def semiconductor_universe(conn: sqlite3.Connection) -> dict[str, tuple[str, str, bool]]:
+    """回傳 {stock_id: (name, sub, sub_multi)}，universe 來源 = stocks 表 industry_name
+    含「半導體」的上市上櫃全部股票。sub 來自 stock_sub_industry（chain='半導體'，
+    一檔多列時取 node 字母序第一列）；查無任何節點列的股票 sub 標「其他」，
+    不臆測。sub_multi=True 表示該股票在 stock_sub_industry 有多列（跨節點重疊，
+    例如同時是晶圓製造又是DRAM製造），只取了其中一列當代表值。"""
     rows = conn.execute(
         "SELECT stock_id, name FROM stocks WHERE industry_name LIKE '%半導體%'"
     ).fetchall()
-    return {sid: (name, SEMI_SUB_MAP.get(sid, "其他")) for sid, name in rows}
+    sub_rows = conn.execute(
+        "SELECT stock_id, sub FROM stock_sub_industry WHERE chain = '半導體' ORDER BY stock_id, node"
+    ).fetchall()
+    sub_by_stock: dict[str, list[str]] = {}
+    for sid, sub in sub_rows:
+        sub_by_stock.setdefault(sid, []).append(sub)
+
+    result = {}
+    for sid, name in rows:
+        subs = sub_by_stock.get(sid)
+        if not subs:
+            result[sid] = (name, "其他", False)
+        else:
+            result[sid] = (name, subs[0], len(subs) > 1)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +460,7 @@ def _detect_split_flag(prices_sorted: list[tuple[str, float]]) -> bool:
     return False
 
 
-def _screen_one(conn: sqlite3.Connection, sid: str, name: str, universe: str, sub: str) -> dict | None:
+def _screen_one(conn: sqlite3.Connection, sid: str, name: str, universe: str, sub: str, sub_multi: bool = False) -> dict | None:
     per_rows = conn.execute(
         "SELECT date, per, pbr, dividend_yield FROM per_daily WHERE stock_id = ? ORDER BY date", (sid,)
     ).fetchall()
@@ -543,7 +558,7 @@ def _screen_one(conn: sqlite3.Connection, sid: str, name: str, universe: str, su
         "loss_q": loss_q, "eps_ttm_growth": eps_ttm_growth,
         "split_flag": split_flag, "band_ok": band_ok,
         "not_ok_reason": "；".join(reasons) if reasons else None,
-        "category": category, "last_date": last_date,
+        "category": category, "last_date": last_date, "sub_multi": sub_multi,
     }
 
 
@@ -554,8 +569,8 @@ def screen(conn: sqlite3.Connection) -> dict:
     rows = []
     last_date_overall = None
     for universe_name, universe in (("ai_chain", ai_chain), ("semiconductor", semiconductor)):
-        for sid, (name, sub) in universe.items():
-            r = _screen_one(conn, sid, name, universe_name, sub)
+        for sid, (name, sub, sub_multi) in universe.items():
+            r = _screen_one(conn, sid, name, universe_name, sub, sub_multi)
             if r is None:
                 continue
             if last_date_overall is None or r["last_date"] > last_date_overall:
@@ -574,15 +589,16 @@ def screen(conn: sqlite3.Connection) -> dict:
                 run_date, stock_id, name, universe, sub, price, per,
                 per_p25, per_p50, per_p75, position, fair_low, fair_high,
                 pbr, pbr_p25, pbr_p75, dividend_yield, per_points, eps_quarters,
-                eps_cv, loss_q, eps_ttm_growth, split_flag, band_ok, not_ok_reason, category
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                eps_cv, loss_q, eps_ttm_growth, split_flag, band_ok, not_ok_reason, category,
+                sub_multi
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_date, r["stock_id"], r["name"], r["universe"], r["sub"], r["price"], r["per"],
                 r["per_p25"], r["per_p50"], r["per_p75"], r["position"], r["fair_low"], r["fair_high"],
                 r["pbr"], r["pbr_p25"], r["pbr_p75"], r["dividend_yield"], r["per_points"], r["eps_quarters"],
                 r["eps_cv"], r["loss_q"], r["eps_ttm_growth"], int(r["split_flag"]), int(r["band_ok"]),
-                r["not_ok_reason"], r["category"],
+                r["not_ok_reason"], r["category"], int(r["sub_multi"]),
             ),
         )
     conn.commit()

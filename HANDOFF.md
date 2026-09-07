@@ -1018,3 +1018,72 @@
 - **驗證方式**：看 `data/refresh.log` 是否有當日「共 12 步，失敗 0 步」；DB 口徑抽查 `SELECT MAX(date) FROM daily_prices`。
 
 - 2026-09-07 委員會評估四檔半導體低估候選，見 `analysis/semiconductor-committee-2026-09-07.md`；待辦：sub 子產業 dict 覆蓋不足（147/190 落「其他」）、篩選加近 3 月營收 YoY 交叉欄位。
+
+## 子產業分類改用官方來源（2026-09-07，Claude Code）
+
+- **動機**：上一則待辦提到 `build_valuation.py` 寫死的 `SEMI_SUB_MAP` 覆蓋率不足
+  （147/190 檔落「其他」），且是人工憑印象填寫、無來源可查證。
+- **來源可行性（階段一）**：實測證交所／櫃買「產業價值鏈資訊平台」
+  (<https://ic.tpex.org.tw/>) `introduce.php?ic=D000`（半導體鏈）——**單一 GET 靜態
+  HTML 就含完整節點/子鏈的公司清單**，不需要 headless browser。節點結構：
+  `<div id="companyList_<node_id>" title="<節點名>">` 內是 `<a class="company-
+  text-over" href="company_basic.php?stk_code=XXXX" title="公司名">`；**部分節點另有
+  更細的子鏈**（D100 IC設計 → 子鏈 D110~D1F0；D300 IC/晶圓製造 → 子鏈 D310 晶圓製造／
+  D320 DRAM製造／D330 其他IC/二極體製造），子鏈公司清單在
+  `<table id="sc_company_<sub_id>">`，同樣結構。D300 父節點的平面清單把晶圓代工／
+  記憶體／化合物半導體／功率元件全部混在一起無法對齊 12 類，**必須改用子鏈**才有
+  可用粒度，這是本輪花最多時間排查的一點（一開始以為子鏈是純前端 JS 過濾、要另外找
+  AJAX endpoint，後來才發現子鏈公司表其實已經內嵌在同一份靜態 HTML 裡，只是文件
+  結構比預期深一層）。twinkle-hub `tw_search_datasets` 沒找到更好的現成資料集，
+  data.gov.tw 上沒有對應「產業鏈節點」顆粒度的公開資料集，最終採用 TPEx 頁面。
+- **落地（階段二）**：
+  - `collectors/industry_chain.py`：`fetch_chain(ic_param)` 抓一整條產業鏈，回傳
+    `[{node_id, node_name, stock_id, name}]`；有子鏈的節點（`SUBCHAIN_PARENTS =
+    {"D300"}`）只收子鏈、不收父節點平面清單（避免重複計數）；D100 的子鏈全部同屬
+    「IC設計」細分類，刻意不展開，直接用父節點平面清單。
+  - `build_sub_industry.py`：新表 `stock_sub_industry(stock_id, chain, node, sub,
+    source, confidence, updated_at)`，PK `(stock_id, node, source)`。抓半導體鏈
+    （`chain='半導體'`，`align_sub=True`，套用 `NODE_TO_SUB` 12 類對照表）+ 被動元件鏈
+    （`chain='被動元件'`，`ic=J000`，`align_sub=False`，`sub` 直接填節點原名，TPEx
+    首頁盤點過沒有獨立的光通訊/功率鏈，這兩個題材已內含在半導體鏈節點裡）。
+    `NODE_TO_SUB` 對照（含理由見程式內註解）：IP設計/IC設計代工服務→矽智財與ASIC、
+    IC設計→IC設計、光罩→其他、晶圓製造→晶圓代工、DRAM製造→記憶體、其他IC/二極體
+    製造→功率與分離元件、生產製程及檢測設備→設備、化學品/基板/導線架→材料與矽晶圓、
+    IC封裝測試→封測、IC模組→其他、IC通路→通路。跑一次約 2 個請求（每條鏈一次），
+    數秒完成，冪等（先刪 `chain+source` 對應舊列再整批寫入）。
+  - **半導體 universe（206 檔）比對缺口**：12 檔在產業鏈平台完全查無節點——
+    2363矽統、2388威盛、3686達能、4967十銓、6451訊芯-KY、6525捷敏-KY、6573虹揚-KY、
+    6962奕力-KY、7749意騰-KY、6854錼創科技-KY創、6921嘉雨思-創、6187萬潤（多為
+    -KY 境外發行人或近期新掛牌股，跟月營收 MOPS 缺口的模式類似），**未自動補**，
+    如實記錄。
+  - `build_valuation.py` 改動：`semiconductor_universe(conn)` 改讀
+    `stock_sub_industry`（一檔多列時取 `node` 字母序第一列，`sub_multi` 欄位標記
+    是否有多列被捨棄）；刪除 `SEMI_SUB_MAP` 寫死 dict；`ai_chain_universe()` 回傳形狀
+    同步改成 3-tuple `(name, sub, sub_multi)`（AI 主鏈固定 `sub_multi=False`）；
+    `valuation_screen` 新增 `sub_multi` 欄位（`ALTER TABLE` 補齊舊 db，冪等）。
+  - 重跑 `--screen` 後半導體 190 檔（206 檔中 190 檔有 per_daily 資料）子產業分布：
+
+    | sub | 檔數 | 低於區間 | 區間內 | 高於區間 | band_ok |
+    |---|---|---|---|---|---|
+    | IC設計 | 74 | 30 | 29 | 15 | 31 |
+    | 設備 | 35 | 11 | 14 | 10 | 19 |
+    | 封測 | 23 | 3 | 8 | 12 | 12 |
+    | 其他 | 21 | 10 | 5 | 6 | 2 |
+    | 晶圓代工 | 10 | 1 | 4 | 5 | 4 |
+    | 功率與分離元件 | 8 | 1 | 1 | 6 | 2 |
+    | 矽智財與ASIC | 7 | 2 | 1 | 4 | 4 |
+    | 材料與矽晶圓 | 7 | 1 | 2 | 4 | 3 |
+    | 記憶體 | 4 | 3 | 0 | 1 | 0 |
+    | 通路 | 1 | 0 | 1 | 0 | 0 |
+
+    「其他」從舊 dict 的 147/190 降到 21/190；19 檔 `sub_multi=1`（跨節點重疊，例如
+    南亞科同時是晶圓製造+DRAM製造）。
+  - 新增 `tests/test_sub_industry.py`（4 個測試：表存在＋PK 唯一、半導體鏈 sub 全落在
+    12 類內、抽查 2330→晶圓代工/2454→IC設計/3711→封測、`NODE_TO_SUB` 對照表本身
+    值域檢查），連同既有測試共 236 個測試（3 個既有失敗跟本次改動無關，是
+    `test_fundamentals_content.py` 偵測到 `monthly_revenue`/`institutional_flow_daily`
+    資料不夠新鮮——本機只跑了 `build_db.py`，沒有跑完整 `refresh_daily.py` 鏈，
+    正常現象，下次排程跑過就會過）。
+  - **建議更新頻率**：每季（產業鏈成分股變動不快），手動重跑
+    `python build_sub_industry.py` 即可；未排入 `refresh_daily.py` 每日鏈。
+  - 怎麼重跑：`python build_sub_industry.py` → `python build_valuation.py --screen`。

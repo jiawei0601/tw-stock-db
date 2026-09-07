@@ -40,6 +40,7 @@ python -m pytest tests/ -q    # 驗證
   留給未來任務）。欄位：`stock_id`、`group_name`、`group_type`、`source`、`created_at`。
 - `per_daily` / `eps_quarterly` / `valuation_fetch_log` / `valuation_screen`：估值篩選表
   （AI 供應鏈 83 檔 + 半導體全市場），詳見下方「估值篩選（build_valuation.py）」小節。
+- `stock_sub_industry`：產業鏈節點子產業分類表（來源見下方「子產業分類」小節）。
 
 ## 資料來源
 
@@ -119,6 +120,32 @@ python build_valuation.py --import-cache <cache.json> [--import-cache <another.j
   一律強制 `False`**——緯穎（6669）2026-09-02 一拆三（收盤價 7800→2610）是本輪新增的
   已知盲點修正，原 `ai_valuation_v2.py` 完全沒有分割偵測、`semi_screen.py` 雖有偵測但
   只套用在半導體 universe，本腳本統一套用到兩個 universe。
+
+## 子產業分類（build_sub_industry.py）
+
+**【2026-09-07】** 半導體 universe 的子產業標記（`valuation_screen.sub`）改從
+`stock_sub_industry` 表讀取，來源是證交所／櫃買「產業價值鏈資訊平台」
+(<https://ic.tpex.org.tw/>) 半導體產業鏈頁面的官方節點分類，取代原本寫死在
+`build_valuation.py` 裡、覆蓋率不足（147/190 檔落「其他」）且無來源可查證的
+`SEMI_SUB_MAP` dict。
+
+```
+python build_sub_industry.py    # 抓半導體鏈 + 被動元件鏈節點 -> stock_sub_industry
+python build_valuation.py --screen    # 重跑篩選，sub 改讀新表
+```
+
+- 節點名對齊固定 12 類（IC設計／晶圓代工／封測／記憶體／矽智財與ASIC／設備／材料與
+  矽晶圓／化合物半導體／功率與分離元件／光電與感測／通路／其他），對照表與每條對齊
+  理由見 `build_sub_industry.py` 的 `NODE_TO_SUB`；一檔股票可能對應多個節點（例如
+  南亞科同時是「晶圓製造」與「DRAM製造」），`valuation_screen.sub_multi=1` 標記這種
+  情況（`sub` 固定取第一列代表值，不代表其餘節點不存在）。
+- 半導體 universe（206 檔）中有 12 檔在產業鏈平台完全查無節點（多為 -KY 境外發行人
+  或近期上市新股），這批**未自動補**，`stock_sub_industry` 就是完整清單，跑
+  `build_sub_industry.py` 印出的清單即為目前缺口。
+- 建議更新頻率：每季（產業鏈成分股變動不快）。手動重跑 `build_sub_industry.py` 即可，
+  未排入 `refresh_daily.py` 每日鏈（避免每天對同一個幾乎不變的頁面發請求）。
+- 「其他」分布從舊 dict 的 147/190 降到 21/190（見 HANDOFF.md 2026-09-07 紀錄的完整
+  分布表）。
 
 ## 專案定位與慣例
 
