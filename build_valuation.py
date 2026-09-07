@@ -90,6 +90,32 @@ CREATE TABLE IF NOT EXISTS fm_revenue_monthly (
     PRIMARY KEY (stock_id, ym)
 );
 
+CREATE TABLE IF NOT EXISTS fm_corporate_events (
+    stock_id     TEXT NOT NULL,
+    date         TEXT NOT NULL,
+    event_type   TEXT,
+    before_price REAL,
+    after_price  REAL,
+    ratio        REAL,
+    raw_json     TEXT,
+    source       TEXT NOT NULL,
+    PRIMARY KEY (stock_id, date, source)
+);
+
+CREATE TABLE IF NOT EXISTS fm_delisting (
+    stock_id  TEXT NOT NULL,
+    date      TEXT NOT NULL,
+    name      TEXT,
+    PRIMARY KEY (stock_id, date)
+);
+
+CREATE TABLE IF NOT EXISTS fm_price_adj_daily (
+    stock_id   TEXT NOT NULL,
+    date       TEXT NOT NULL,
+    close_adj  REAL,
+    PRIMARY KEY (stock_id, date)
+);
+
 CREATE TABLE IF NOT EXISTS valuation_fetch_log (
     stock_id    TEXT NOT NULL,
     dataset     TEXT NOT NULL,
@@ -1054,6 +1080,354 @@ def screen(conn: sqlite3.Connection) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# --fetch-events & --fetch-adj（工單第 0 節：公司行動與還原股價）
+# ---------------------------------------------------------------------------
+
+def fetch_corporate_events(conn: sqlite3.Connection) -> dict:
+    """抓全市場公司行動事件（不帶 data_id，start_date=2020-01-01）：
+    TaiwanStockSplitPrice, TaiwanStockCapitalReductionReferencePrice,
+    TaiwanStockParValueChange, TaiwanStockDelisting。
+    寫入 fm_corporate_events 與 fm_delisting。"""
+    import requests
+    import pandas as pd
+
+    token = _finmind_token()
+    session = requests.Session()
+    now = _now_iso()
+    events_inserted = 0
+    delisting_inserted = 0
+    missing_items: list[str] = []
+    stopped_reason: str | None = None
+
+    def _do_get(params: dict) -> tuple[list | None, int | None]:
+        nonlocal stopped_reason
+        time.sleep(0.5)
+        resp = None
+        for attempt in range(2):
+            try:
+                resp = session.get(FINMIND_URL, params=params, timeout=30)
+                if resp.status_code in (402, 403):
+                    stopped_reason = f"error_{resp.status_code}"
+                    return None, resp.status_code
+                if 500 <= resp.status_code < 600:
+                    if attempt == 0:
+                        time.sleep(1.0)
+                        continue
+                    missing_items.append(f"{params.get('dataset')}: 5xx")
+                    return None, resp.status_code
+                break
+            except Exception as exc:
+                if attempt == 0:
+                    time.sleep(1.0)
+                    continue
+                missing_items.append(f"{params.get('dataset')}: {exc}")
+                return None, None
+
+        if resp is not None and resp.status_code == 200:
+            try:
+                payload = resp.json()
+                if payload.get("status") == 200:
+                    return payload.get("data", []), 200
+            except Exception as exc:
+                missing_items.append(f"{params.get('dataset')}: {exc}")
+                return None, None
+        code = resp.status_code if resp is not None else None
+        return None, code
+
+    # 1. TaiwanStockSplitPrice
+    data, code = _do_get({"dataset": "TaiwanStockSplitPrice", "start_date": "2020-01-01", "token": token})
+    if stopped_reason:
+        return {"events": events_inserted, "delisting": delisting_inserted, "stopped_reason": stopped_reason, "missing": missing_items}
+    if data:
+        for d in data:
+            sid = str(d.get("stock_id", "")).strip()
+            dt = d.get("date", "").strip()
+            if not sid or not dt:
+                continue
+            bp = d.get("before_price")
+            ap = d.get("after_price")
+            ratio = (bp / ap) if (bp is not None and ap and ap > 0) else None
+            conn.execute(
+                """INSERT OR REPLACE INTO fm_corporate_events
+                   (stock_id, date, event_type, before_price, after_price, ratio, raw_json, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (sid, dt, d.get("type", "split"), bp, ap, ratio, json.dumps(d, ensure_ascii=False), "TaiwanStockSplitPrice")
+            )
+            events_inserted += 1
+
+    # 2. TaiwanStockParValueChange
+    data, code = _do_get({"dataset": "TaiwanStockParValueChange", "start_date": "2020-01-01", "token": token})
+    if stopped_reason:
+        return {"events": events_inserted, "delisting": delisting_inserted, "stopped_reason": stopped_reason, "missing": missing_items}
+    if data:
+        for d in data:
+            sid = str(d.get("stock_id", "")).strip()
+            dt = d.get("date", "").strip()
+            if not sid or not dt:
+                continue
+            bp = d.get("before_close")
+            ap = d.get("after_ref_close")
+            ratio = (bp / ap) if (bp is not None and ap and ap > 0) else None
+            conn.execute(
+                """INSERT OR REPLACE INTO fm_corporate_events
+                   (stock_id, date, event_type, before_price, after_price, ratio, raw_json, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (sid, dt, "par_value_change", bp, ap, ratio, json.dumps(d, ensure_ascii=False), "TaiwanStockParValueChange")
+            )
+            events_inserted += 1
+
+    # 3. TaiwanStockDelisting
+    data, code = _do_get({"dataset": "TaiwanStockDelisting", "start_date": "2020-01-01", "token": token})
+    if stopped_reason:
+        return {"events": events_inserted, "delisting": delisting_inserted, "stopped_reason": stopped_reason, "missing": missing_items}
+    if data:
+        for d in data:
+            sid = str(d.get("stock_id", "")).strip()
+            dt = d.get("date", "").strip()
+            if not sid or not dt:
+                continue
+            name = d.get("stock_name", "")
+            conn.execute(
+                "INSERT OR REPLACE INTO fm_delisting (stock_id, date, name) VALUES (?, ?, ?)",
+                (sid, dt, name)
+            )
+            delisting_inserted += 1
+
+    # 4. TaiwanStockCapitalReductionReferencePrice
+    data, code = _do_get({"dataset": "TaiwanStockCapitalReductionReferencePrice", "start_date": "2020-01-01", "token": token})
+    if stopped_reason:
+        return {"events": events_inserted, "delisting": delisting_inserted, "stopped_reason": stopped_reason, "missing": missing_items}
+    if data:
+        for d in data:
+            sid = str(d.get("stock_id", "")).strip()
+            dt = d.get("date", "").strip()
+            if not sid or not dt:
+                continue
+            bp = d.get("ClosingPriceonTheLastTradingDay")
+            ap = d.get("PostReductionReferencePrice")
+            ratio = (bp / ap) if (bp is not None and ap and ap > 0) else None
+            conn.execute(
+                """INSERT OR REPLACE INTO fm_corporate_events
+                   (stock_id, date, event_type, before_price, after_price, ratio, raw_json, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (sid, dt, d.get("ReasonforCapitalReduction", "capital_reduction"), bp, ap, ratio, json.dumps(d, ensure_ascii=False), "TaiwanStockCapitalReductionReferencePrice")
+            )
+            events_inserted += 1
+    elif code == 400:
+        # FinMind register tier 不允許不帶 data_id，降級逐一對 survivors 抓取
+        survivors_path = Path(__file__).parent / "backtest" / "universe_2026_survivors.csv"
+        if survivors_path.exists():
+            sids = pd.read_csv(survivors_path)["stock_id"].astype(str).tolist()
+            for sid in sids:
+                already = conn.execute(
+                    "SELECT 1 FROM valuation_fetch_log WHERE stock_id=? AND dataset='TaiwanStockCapitalReductionReferencePrice' AND status='fetched' LIMIT 1",
+                    (sid,)
+                ).fetchone()
+                if already:
+                    continue
+                d_list, c_code = _do_get({
+                    "dataset": "TaiwanStockCapitalReductionReferencePrice",
+                    "data_id": sid,
+                    "start_date": "2020-01-01",
+                    "token": token
+                })
+                if stopped_reason:
+                    break
+                if d_list:
+                    for d in d_list:
+                        dt = d.get("date", "").strip()
+                        if not dt:
+                            continue
+                        bp = d.get("ClosingPriceonTheLastTradingDay")
+                        ap = d.get("PostReductionReferencePrice")
+                        ratio = (bp / ap) if (bp is not None and ap and ap > 0) else None
+                        conn.execute(
+                            """INSERT OR REPLACE INTO fm_corporate_events
+                               (stock_id, date, event_type, before_price, after_price, ratio, raw_json, source)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (sid, dt, d.get("ReasonforCapitalReduction", "capital_reduction"), bp, ap, ratio, json.dumps(d, ensure_ascii=False), "TaiwanStockCapitalReductionReferencePrice")
+                        )
+                        events_inserted += 1
+                conn.execute(
+                    "INSERT OR REPLACE INTO valuation_fetch_log (stock_id, dataset, fetched_at, status, rows) VALUES (?, ?, ?, ?, ?)",
+                    (sid, "TaiwanStockCapitalReductionReferencePrice", now, "fetched", len(d_list) if d_list else 0)
+                )
+                conn.commit()
+
+    conn.commit()
+    return {
+        "events": events_inserted,
+        "delisting": delisting_inserted,
+        "stopped_reason": stopped_reason,
+        "missing": missing_items,
+    }
+
+
+def build_adj_prices_from_events(conn: sqlite3.Connection) -> int:
+    """從 fm_price_daily 與已確認事件 (fm_corporate_events) 建立 fm_price_adj_daily。
+    無事件區間保持原始價格報酬；只有 confirmed 事件前之價格向後調整除以 ratio。"""
+    # 讀取所有事件並按 (stock_id, date) 去重
+    events_raw = conn.execute(
+        """SELECT stock_id, date, ratio, source
+           FROM fm_corporate_events
+           WHERE ratio IS NOT NULL AND ratio > 0
+           ORDER BY stock_id, date ASC"""
+    ).fetchall()
+
+    events_by_stock: dict[str, list[tuple[str, float]]] = {}
+    seen_events: set[tuple[str, str]] = set()
+    for sid, dt, r, src in events_raw:
+        key = (sid, dt)
+        if key in seen_events:
+            continue
+        seen_events.add(key)
+        events_by_stock.setdefault(sid, []).append((dt, float(r)))
+
+    # 取出所有股票
+    stocks = [row[0] for row in conn.execute("SELECT DISTINCT stock_id FROM fm_price_daily").fetchall()]
+    total_written = 0
+
+    for sid in stocks:
+        p_rows = conn.execute(
+            "SELECT date, close FROM fm_price_daily WHERE stock_id=? ORDER BY date ASC",
+            (sid,)
+        ).fetchall()
+        if not p_rows:
+            continue
+
+        ev_list = events_by_stock.get(sid, [])
+        batch = []
+        for dt, close in p_rows:
+            if close is None:
+                continue
+            # 計算該日期所處的向後調整乘數
+            # 任何發生在 dt 之後的事件，其 ratio 都要除進去
+            mult = 1.0
+            for ev_dt, r in ev_list:
+                if dt < ev_dt:
+                    mult /= r
+            close_adj = round(close * mult, 4)
+            batch.append((sid, dt, close_adj))
+
+        conn.executemany(
+            "INSERT OR REPLACE INTO fm_price_adj_daily (stock_id, date, close_adj) VALUES (?, ?, ?)",
+            batch
+        )
+        total_written += len(batch)
+
+    conn.commit()
+    return total_written
+
+
+def fetch_adj_prices(conn: sqlite3.Connection) -> dict:
+    """對 universe_2026_survivors.csv 抓 TaiwanStockPriceAdj（2020-12-01 起）。
+    寫入 fm_price_adj_daily。若 API 權限不足（register 等級 status 400），改由
+    fm_price_daily + confirmed fm_corporate_events 建立。"""
+    import requests
+    import pandas as pd
+
+    token = _finmind_token()
+    session = requests.Session()
+    now = _now_iso()
+
+    survivors_path = Path(__file__).parent / "backtest" / "universe_2026_survivors.csv"
+    if not survivors_path.exists():
+        return {"fetched": 0, "error": "universe_2026_survivors.csv not found"}
+    sids = pd.read_csv(survivors_path)["stock_id"].astype(str).tolist()
+
+    missing_items: list[str] = []
+    stopped_reason: str | None = None
+    fetched = 0
+    skipped = 0
+    level_register_detected = False
+
+    for sid in sids:
+        has_adj = conn.execute("SELECT 1 FROM fm_price_adj_daily WHERE stock_id=? LIMIT 1", (sid,)).fetchone()
+        if has_adj:
+            skipped += 1
+            continue
+
+        if level_register_detected:
+            missing_items.append(sid)
+            continue
+
+        time.sleep(0.5)
+        resp = None
+        for attempt in range(2):
+            try:
+                resp = session.get(FINMIND_URL, params={
+                    "dataset": "TaiwanStockPriceAdj",
+                    "data_id": sid,
+                    "start_date": "2020-12-01",
+                    "token": token
+                }, timeout=30)
+                if resp.status_code in (402, 403):
+                    stopped_reason = f"error_{resp.status_code}"
+                    break
+                if 500 <= resp.status_code < 600:
+                    if attempt == 0:
+                        time.sleep(1.0)
+                        continue
+                    missing_items.append(f"{sid}: 5xx")
+                    break
+                break
+            except Exception as exc:
+                if attempt == 0:
+                    time.sleep(1.0)
+                    continue
+                missing_items.append(f"{sid}: {exc}")
+                break
+
+        if stopped_reason:
+            break
+
+        if resp is not None and resp.status_code == 400:
+            msg = resp.text
+            if "level is register" in msg or "user level" in msg or "free" in msg:
+                level_register_detected = True
+                missing_items.append(f"{sid}: FinMind TaiwanStockPriceAdj requires Sponsor level (account is register)")
+                conn.execute(
+                    "INSERT OR REPLACE INTO valuation_fetch_log (stock_id, dataset, fetched_at, status, rows) VALUES (?, ?, ?, ?, ?)",
+                    (sid, "TaiwanStockPriceAdj", now, "error_400_level_register", 0)
+                )
+                conn.commit()
+                continue
+            else:
+                missing_items.append(f"{sid}: 400 {msg[:100]}")
+                continue
+
+        if resp is not None and resp.status_code == 200:
+            payload = resp.json()
+            data = payload.get("data", [])
+            if data:
+                batch = [
+                    (sid, d["date"], d.get("close_adj") or d.get("close") or d.get("adj_close"))
+                    for d in data if d.get("date") and (d.get("close_adj") or d.get("close") or d.get("adj_close"))
+                ]
+                conn.executemany(
+                    "INSERT OR REPLACE INTO fm_price_adj_daily (stock_id, date, close_adj) VALUES (?, ?, ?)",
+                    batch
+                )
+                conn.commit()
+                fetched += 1
+            else:
+                missing_items.append(f"{sid}: empty")
+
+    if level_register_detected or conn.execute("SELECT COUNT(*) FROM fm_price_adj_daily").fetchone()[0] == 0:
+        print("FinMind TaiwanStockPriceAdj 受帳號權限（register 等級）限制，改由 fm_price_daily + confirmed 事件建立還原序列...")
+        built = build_adj_prices_from_events(conn)
+        print(f"fm_price_adj_daily 建置完成：共 {built} 列")
+
+    return {
+        "fetched": fetched,
+        "skipped": skipped,
+        "stopped_reason": stopped_reason,
+        "missing": missing_items,
+        "level_register_detected": level_register_detected,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1064,6 +1438,10 @@ def main() -> None:
                          help="可重複指定，依序匯入多份舊腳本留下的 JSON cache")
     parser.add_argument("--fetch", action="store_true", help="對缺資料的股票打 FinMind API 補抓")
     parser.add_argument("--screen", action="store_true", help="本地運算篩選並寫入 valuation_screen")
+    parser.add_argument("--fetch-events", action="store_true",
+                         help="抓全市場公司行動事件與下市資料寫入 fm_corporate_events / fm_delisting")
+    parser.add_argument("--fetch-adj", action="store_true",
+                         help="抓 237 檔存活股 TaiwanStockPriceAdj 寫入 fm_price_adj_daily")
     parser.add_argument("--backfill", nargs="?", const=BACKFILL_DEFAULT_START, default=None,
                          metavar="YYYY-MM-DD",
                          help=f"回填四個 dataset 的歷史到指定日期（預設 {BACKFILL_DEFAULT_START}），"
@@ -1113,6 +1491,24 @@ def main() -> None:
                       f"has_data={s['have_any_data']} done_to_target={s['done_to_target']} "
                       f"missing={s['missing']}")
             print(f"總計還缺 {status['_total_remaining']} 個 (股票,dataset)")
+
+        if args.fetch_events:
+            print("開始抓取全市場公司行動事件與下市資料 (TaiwanStockSplitPrice, TaiwanStockParValueChange, TaiwanStockDelisting, TaiwanStockCapitalReductionReferencePrice)...")
+            res_ev = fetch_corporate_events(conn)
+            print(f"公司行動事件抓取完成：新增/覆蓋 {res_ev['events']} 筆事件、{res_ev['delisting']} 筆下市")
+            if res_ev["stopped_reason"]:
+                print(f"因 {res_ev['stopped_reason']} 提前停止")
+            if res_ev["missing"]:
+                print(f"缺漏/失敗項目：{res_ev['missing']}")
+
+        if args.fetch_adj:
+            print("開始抓取/建置 237 檔存活股 TaiwanStockPriceAdj (fm_price_adj_daily)...")
+            res_adj = fetch_adj_prices(conn)
+            print(f"TaiwanStockPriceAdj 處理完成：新抓 {res_adj['fetched']} 檔，跳過 {res_adj['skipped']} 檔")
+            if res_adj["stopped_reason"]:
+                print(f"因 {res_adj['stopped_reason']} 提前停止")
+            if res_adj["missing"]:
+                print(f"缺漏/失敗項目數：{len(res_adj['missing'])} 檔")
 
         if args.screen:
             result = screen(conn)

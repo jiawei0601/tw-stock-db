@@ -476,8 +476,17 @@ def run_backtest_t1(
             "first_close_date": None,
         })
         conn_tmp.close()
-    universe_stocks = sorted(df_surv["stock_id"].astype(str).str.zfill(4).tolist())
-    first_close_date_map = dict(zip(df_surv["stock_id"].astype(str).str.zfill(4), df_surv["first_close_date"]))
+    try:
+        import build_valuation
+        ai_stocks = set(str(k).zfill(4) for k in build_valuation.ai_chain_universe().keys())
+    except Exception:
+        ai_stocks = set()
+    all_sub_stocks = set(str(r[0]).zfill(4) for r in conn.execute("SELECT DISTINCT stock_id FROM stock_sub_industry"))
+    mother_union = ai_stocks | all_sub_stocks
+    surv_stock_set = set(df_surv["stock_id"].astype(str).str.zfill(4))
+    universe_stocks = sorted(list(mother_union | surv_stock_set))
+
+    first_close_date_map = dict(zip(df_surv["stock_id"].astype(str).str.zfill(4), df_surv.get("listed_date", df_surv.get("first_close_date"))))
     surv_sub_map = dict(zip(df_surv["stock_id"].astype(str).str.zfill(4), df_surv["sub"]))
 
     sub_map: dict[str, str] = {}
@@ -489,27 +498,41 @@ def run_backtest_t1(
         elif sid not in sub_map:
             sub_map[sid] = "其他"
 
-    # 2. 交易日曆與月訊號日
-    dates_df = pd.read_sql("SELECT DISTINCT date FROM fm_price_daily ORDER BY date", conn)
+    # 載入下市名單
+    try:
+        delist_rows = conn.execute("SELECT stock_id, date FROM fm_delisting").fetchall()
+        delist_map = {str(r[0]).zfill(4): r[1] for r in delist_rows}
+    except Exception:
+        delist_map = {}
+
+    # 2. 交易日曆與月訊號日（以 fm_price_adj_daily 為準）
+    try:
+        dates_df = pd.read_sql("SELECT DISTINCT date FROM fm_price_adj_daily ORDER BY date", conn)
+    except Exception:
+        dates_df = pd.read_sql("SELECT DISTINCT date FROM fm_price_daily ORDER BY date", conn)
     all_trading_dates = dates_df["date"].tolist()
     date_to_idx = {d: i for i, d in enumerate(all_trading_dates)}
     dates_s = pd.to_datetime(dates_df["date"])
     month_signals = filter_complete_month_signals(all_trading_dates)
 
-    # 載入公司行動表
-    corp_actions_file = out_dir / "corporate_actions_detected.csv"
-    corp_actions_map: dict[str, dict[str, float]] = {}
-    if corp_actions_file.exists():
-        ca_df = pd.read_csv(corp_actions_file, dtype={"stock_id": str})
-        for _, r in ca_df.iterrows():
-            corp_actions_map.setdefault(str(r["stock_id"]).zfill(4), {})[str(r["date"])] = float(r["multiplier"])
-
-    # 3. 載入價格、法人、EPS 與營收資料
-    df_price = pd.read_sql("SELECT stock_id, date, close FROM fm_price_daily WHERE close > 0 ORDER BY stock_id, date", conn)
+    # 3. 載入還原價格 (fm_price_adj_daily) 與未還原價格 (fm_price_daily)
+    df_price = pd.read_sql(
+        "SELECT stock_id, date, close_adj AS close FROM fm_price_adj_daily WHERE close_adj > 0 ORDER BY stock_id, date",
+        conn,
+    )
     df_price["stock_id"] = df_price["stock_id"].astype(str).str.zfill(4)
     df_price = df_price[df_price["stock_id"].isin(universe_stocks)]
     price_rows_by_stock = {sid: list(zip(grp["date"], grp["close"])) for sid, grp in df_price.groupby("stock_id")}
     price_dict_by_stock = {sid: dict(zip(grp["date"], grp["close"])) for sid, grp in df_price.groupby("stock_id")}
+
+    df_price_unadj = pd.read_sql(
+        "SELECT stock_id, date, close FROM fm_price_daily WHERE close > 0 ORDER BY stock_id, date",
+        conn,
+    )
+    df_price_unadj["stock_id"] = df_price_unadj["stock_id"].astype(str).str.zfill(4)
+    df_price_unadj = df_price_unadj[df_price_unadj["stock_id"].isin(universe_stocks)]
+    price_unadj_rows_by_stock = {sid: list(zip(grp["date"], grp["close"])) for sid, grp in df_price_unadj.groupby("stock_id")}
+    price_unadj_dict_by_stock = {sid: dict(zip(grp["date"], grp["close"])) for sid, grp in df_price_unadj.groupby("stock_id")}
 
     df_inst = pd.read_sql(
         "SELECT stock_id, date, foreign_net, trust_net FROM institutional_flow_daily ORDER BY stock_id, date",
@@ -575,9 +598,7 @@ def run_backtest_t1(
             if p_cur is None or p_cur <= 0:
                 continue
 
-            corp_actions_for_stock = corp_actions_map.get(sid, {})
-
-            # 前瞻報酬（Item A: T+1 進出場，不可成交順延最多 3 日，缺價用最後可得價，公司行動還原）
+            # 前瞻報酬（Item A: T+1 進出場，不可成交順延最多 3 日，缺價用最後可得價，還原價由 fm_price_adj_daily 提供）
             stock_fwd = compute_stock_forward_returns(
                 sid=sid,
                 sig_date=sig_date,
@@ -586,7 +607,9 @@ def run_backtest_t1(
                 price_rows=price_rows,
                 all_trading_dates=all_trading_dates,
                 date_to_idx=date_to_idx,
-                corp_actions_map=corp_actions_for_stock,
+                corp_actions_map=None,
+                delist_map=delist_map,
+                unadj_price_dict=price_unadj_dict_by_stock.get(sid, {}),
             )
             fwd_rets = {h: stock_fwd[f"ret_{h}"] for h in ("3m", "6m")}
 
@@ -603,8 +626,8 @@ def run_backtest_t1(
                 is_valid_period=is_inst_valid,
             )
 
-            # 估值排雷指標
-            is_split = detect_split_flag(price_rows, sig_date)
+            # 估值排雷指標（分割旗標改用未還原價偵測）
+            is_split = detect_split_flag(price_unadj_rows_by_stock.get(sid, []), sig_date)
             eps_rows = eps_by_stock.get(sid, [])
             eps_cv, loss_q, eps_ttm_growth, _ = compute_eps_metrics(eps_rows, sig_date)
             rev_rows = rev_by_stock.get(sid, [])
@@ -622,16 +645,9 @@ def run_backtest_t1(
                 or is_split
             )
 
-            # 動能指標 (Point-in-time，若跨公司行動則為 None)
-            if check_corp_action_in_window(corp_actions_for_stock, tgt_date_3m, sig_date):
-                mom_3m = None
-            else:
-                mom_3m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_3m)
-
-            if check_corp_action_in_window(corp_actions_for_stock, tgt_date_1m, sig_date):
-                mom_1m = None
-            else:
-                mom_1m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_1m)
+            # 動能指標 (Point-in-time，以還原價計算，無需因事件設為 None)
+            mom_3m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_3m)
+            mom_1m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_1m)
 
             month_stocks.append({
                 "signal_date": sig_date,
@@ -652,6 +668,13 @@ def run_backtest_t1(
                 "is_trap": is_trap,
                 "ret_3m": fwd_rets["3m"],
                 "ret_6m": fwd_rets["6m"],
+                "ret_3m_cons": stock_fwd.get("ret_3m_cons"),
+                "ret_6m_cons": stock_fwd.get("ret_6m_cons"),
+                "entry_status": stock_fwd.get("entry_status", "unfilled"),
+                "exit_status_3m": stock_fwd.get("exit_status_3m", "unresolved"),
+                "exit_status_6m": stock_fwd.get("exit_status_6m", "unresolved"),
+                "valuation_status_3m": stock_fwd.get("valuation_status_3m", "last_available"),
+                "valuation_status_6m": stock_fwd.get("valuation_status_6m", "last_available"),
                 "exit_reason_3m": stock_fwd.get("exit_reason_3m", "none"),
                 "exit_reason_6m": stock_fwd.get("exit_reason_6m", "none"),
                 "ret_3m_old": stock_fwd.get("ret_3m_old"),
@@ -733,7 +756,10 @@ def run_backtest_t1(
         "flip_1m", "slope_3m", "foreign_20d", "trust_20d", "chips_ok",
         "above_ma60", "ma20_up", "eps_cv", "loss_q", "is_diverge", "is_split", "is_trap",
         "T1a", "T1b", "T1", "T1x", "C1",
-        "ret_3m", "ret_6m", "bench_3m", "bench_6m", "sub_bench_3m", "sub_bench_6m",
+        "ret_3m", "ret_6m", "ret_3m_cons", "ret_6m_cons",
+        "entry_status", "exit_status_3m", "exit_status_6m",
+        "valuation_status_3m", "valuation_status_6m",
+        "bench_3m", "bench_6m", "sub_bench_3m", "sub_bench_6m",
         "exit_reason_3m", "exit_reason_6m", "ret_3m_old", "ret_6m_old",
     ]
     signals_csv_path = out_dir / "t1_signals.csv"

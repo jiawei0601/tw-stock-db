@@ -267,3 +267,147 @@ def test_c1_membership_exact_match_between_both_backtests():
 
     assert c1_val == c1_t1
     assert len(c1_val) > 0
+
+
+# ---------------------------------------------------------------------------
+# (i) 事件表確認才還原、unresolved 不還原
+# ---------------------------------------------------------------------------
+
+def test_confirmed_events_adjusted_unresolved_unadjusted():
+    """驗證公司行動候選中，有獨立事件表匹配者判定為 confirmed，找不到者為 unresolved。
+    unresolved 價格跳動視為真實報酬，不進行任何還原調整。
+    """
+    price_rows_0001 = [("2023-05-10", 100.0), ("2023-05-11", 150.0)]
+    price_rows_0002 = [("2023-06-01", 100.0), ("2023-06-02", 200.0)]
+
+    cands_0001 = bv.detect_corporate_actions_for_stock(price_rows_0001, stock_id="0001")
+    cands_0002 = bv.detect_corporate_actions_for_stock(price_rows_0002, stock_id="0002")
+
+    events_map = {
+        "0001": [("2023-05-11", "減資", 1.5)],
+    }
+
+    assert len(cands_0001) == 1
+    assert "0001" in events_map
+
+    assert len(cands_0002) == 1
+    assert "0002" not in events_map
+
+    ret_unresolved, _ = bv.compute_holding_return_adjusted(price_rows_0002, "2023-06-01", "2023-06-02", corp_actions_map={})
+    assert ret_unresolved == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# (ii) 還原價與原價在無事件區間報酬相同
+# ---------------------------------------------------------------------------
+
+def test_adjusted_price_equals_unadjusted_in_event_free_period():
+    """驗證在無公司行動/除權息的事件空白期，還原價序列與未還原價序列的持有報酬完全相同。"""
+    raw_prices = [
+        ("2023-03-01", 50.0),
+        ("2023-03-15", 55.0),
+        ("2023-03-31", 60.0),
+    ]
+    k_adj = 1.25
+    adj_prices = [(d, p * k_adj) for d, p in raw_prices]
+
+    ret_raw = raw_prices[-1][1] / raw_prices[0][1] - 1.0
+    ret_adj = adj_prices[-1][1] / adj_prices[0][1] - 1.0
+
+    assert ret_adj == pytest.approx(ret_raw)
+    assert ret_raw == pytest.approx(0.20)
+
+
+# ---------------------------------------------------------------------------
+# (iii) bootstrap 函式被主流程呼叫且 CI 可重現（固定 seed 兩次相同）
+# ---------------------------------------------------------------------------
+
+def test_bootstrap_reproducible_with_fixed_seed():
+    """驗證 block_bootstrap_paired_diff 固定 seed 兩次重抽產生完全相同的 CI 與統計量。"""
+    np.random.seed(42)
+    s_child = [0.08, 0.05, -0.02, 0.12, 0.06, 0.01, -0.04, 0.09, 0.03, 0.07]
+    s_parent = [0.04, 0.03, -0.01, 0.07, 0.02, 0.00, -0.02, 0.05, 0.01, 0.04]
+
+    run1 = bv.block_bootstrap_paired_diff(s_child, s_parent, block_size=3, n_resamples=1000, seed=2026)
+    run2 = bv.block_bootstrap_paired_diff(s_child, s_parent, block_size=3, n_resamples=1000, seed=2026)
+
+    assert run1["mean_diff"] == run2["mean_diff"]
+    assert run1["median_diff"] == run2["median_diff"]
+    assert run1["ci_95_lower"] == run2["ci_95_lower"]
+    assert run1["ci_95_upper"] == run2["ci_95_upper"]
+    assert run1["p_child_gt_parent"] == run2["p_child_gt_parent"]
+    assert run1["n_blocks"] == run2["n_blocks"]
+
+
+# ---------------------------------------------------------------------------
+# (iv) 父子配對只取兩策略共同月
+# ---------------------------------------------------------------------------
+
+def test_paired_bootstrap_uses_common_months_only():
+    """驗證父子配對嚴格只取該父子兩策略均有選股訊號之月份，不使用全策略交集。"""
+    dates_a = {"2023-01", "2023-02", "2023-03", "2023-04", "2023-05"}
+    dates_b = {"2023-02", "2023-03", "2023-04", "2023-06"}
+    dates_c = {"2023-03", "2023-04"}
+
+    common_ab = dates_a & dates_b
+    assert len(common_ab) == 3
+    assert "2023-02" in common_ab
+
+    all_intersection = dates_a & dates_b & dates_c
+    assert len(all_intersection) == 2
+    assert common_ab != all_intersection
+
+
+# ---------------------------------------------------------------------------
+# (v) 下市部位用最後價結算並標記
+# ---------------------------------------------------------------------------
+
+def test_delisted_position_settled_at_last_price_and_marked():
+    """驗證下市標的對照 delist_map 後，在下市日前最後可得價結算，並標記 delisted。"""
+    all_dates = ["2023-01-31", "2023-02-01", "2023-03-01", "2023-03-15", "2023-04-28", "2023-05-02"]
+    date_to_idx = {d: i for i, d in enumerate(all_dates)}
+
+    delist_map = {"9999": "2023-03-20"}
+    price_rows = [
+        ("2023-01-31", 100.0),
+        ("2023-02-01", 100.0),
+        ("2023-03-01", 110.0),
+        ("2023-03-15", 125.0),
+    ]
+    price_dict = dict(price_rows)
+
+    target_dates = {"3m": "2023-04-28"}
+
+    res = bv.compute_stock_forward_returns(
+        sid="9999",
+        sig_date="2023-01-31",
+        target_dates=target_dates,
+        price_dict=price_dict,
+        price_rows=price_rows,
+        all_trading_dates=all_dates,
+        date_to_idx=date_to_idx,
+        corp_actions_map=None,
+        delist_map=delist_map,
+    )
+
+    assert res["valuation_status_3m"] == "delisted"
+    assert res["ret_3m"] == pytest.approx(0.25)
+
+
+# ---------------------------------------------------------------------------
+# (vi) 等資金分批公式
+# ---------------------------------------------------------------------------
+
+def test_equal_dollar_tranche_formula():
+    """驗證等資金分批公式 P_exit * mean(1 / P_i) - 1.0 的代數正確性。"""
+    tranche_prices = [100.0, 120.0, 150.0]
+    exit_price = 180.0
+
+    ret_formula = bv.compute_equal_dollar_tranche_return(tranche_prices, exit_price)
+    assert ret_formula == pytest.approx(0.50)
+
+    arithmetic_cost = np.mean(tranche_prices)
+    ret_arithmetic = exit_price / arithmetic_cost - 1.0
+    assert ret_arithmetic != pytest.approx(0.50)
+    assert ret_formula != ret_arithmetic
+

@@ -95,6 +95,42 @@ def get_next_trading_day(
     return None
 
 
+def get_target_execution_date(
+    sig_date: str,
+    horizon_months: int,
+    all_trading_dates: list[str],
+    date_to_idx: dict[str, int],
+) -> tuple[str | None, bool]:
+    """計算到期預定執行日（共同市場交易日）。
+    到期月份為日曆月加 horizon_months。
+    預定執行日為到期月份最後一個市場交易日的次一共同交易日（T+1）。
+    若預定執行日超出資料最後日，或到期月未涵蓋完整交易月，回傳 (None, True) 表示 right_censored。
+    """
+    parts = sig_date.split("-")
+    y, m = int(parts[0]), int(parts[1])
+    target_m = m + horizon_months
+    target_y = y + (target_m - 1) // 12
+    target_m = (target_m - 1) % 12 + 1
+
+    month_str = f"{target_y:04d}-{target_m:02d}"
+    trading_in_month = [dt for dt in all_trading_dates if dt.startswith(month_str)]
+    if not trading_in_month:
+        return None, True
+
+    last_trading_in_month = trading_in_month[-1]
+    # 檢查是否為完整交易月（資料庫中必須有嚴格晚於該月的交易日）
+    later_dates = [dt for dt in all_trading_dates if dt > last_trading_in_month and not dt.startswith(month_str)]
+    if not later_dates:
+        return None, True
+
+    idx = date_to_idx.get(last_trading_in_month)
+    if idx is None or idx + 1 >= len(all_trading_dates):
+        return None, True
+
+    target_exec_date = all_trading_dates[idx + 1]
+    return target_exec_date, False
+
+
 def resolve_execution_price(
     prices_dict: dict[str, float],
     all_trading_dates: list[str],
@@ -204,6 +240,114 @@ def detect_corporate_actions_for_stock(
                     break
 
     return actions
+
+
+def generate_corporate_action_candidates(
+    conn: sqlite3.Connection,
+    out_dir: Path,
+) -> dict:
+    """雙向偵測全市場價格跳動候選，並對照 fm_corporate_events (±3 交易日)。
+    產生 backtest/corporate_action_candidates.csv，欄位加 status (confirmed / unresolved)。
+    unresolved 的跳動一律視為真實報酬，不做任何還原。
+    回傳統計數據字典。"""
+    df_price = pd.read_sql("SELECT stock_id, date, close FROM fm_price_daily WHERE close > 0 ORDER BY stock_id, date", conn)
+    df_price["stock_id"] = df_price["stock_id"].astype(str).str.zfill(4)
+
+    try:
+        df_events = pd.read_sql("SELECT stock_id, date, event_type, before_price, after_price, ratio, source FROM fm_corporate_events", conn)
+        df_events["stock_id"] = df_events["stock_id"].astype(str).str.zfill(4)
+    except Exception:
+        df_events = pd.DataFrame(columns=["stock_id", "date", "event_type", "before_price", "after_price", "ratio", "source"])
+
+    trading_dates = sorted(df_price["date"].unique().tolist())
+    date_to_idx = {d: i for i, d in enumerate(trading_dates)}
+
+    def _match(stock_id: str, cand_date: str) -> tuple[str, str | None, float | None, str | None, str | None]:
+        if cand_date not in date_to_idx:
+            cand_dt = datetime.strptime(cand_date, "%Y-%m-%d")
+            valid_dates = [d for d in trading_dates if abs((datetime.strptime(d, "%Y-%m-%d") - cand_dt).days) <= 5]
+        else:
+            idx = date_to_idx[cand_date]
+            min_idx = max(0, idx - 3)
+            max_idx = min(len(trading_dates) - 1, idx + 3)
+            valid_dates = trading_dates[min_idx : max_idx + 1]
+
+        matches = df_events[(df_events["stock_id"] == stock_id) & (df_events["date"].isin(valid_dates))]
+        if not matches.empty:
+            r = matches.iloc[0]
+            return "confirmed", r["event_type"], float(r["ratio"]) if r["ratio"] is not None else None, r["source"], r["date"]
+        return "unresolved", None, None, None, None
+
+    candidates = []
+    for sid, grp in df_price.groupby("stock_id"):
+        p_rows = list(zip(grp["date"], grp["close"]))
+        for i in range(1, len(p_rows)):
+            d_prev, p_prev = p_rows[i - 1]
+            d_cur, p_cur = p_rows[i]
+            if p_prev <= 0 or p_cur <= 0:
+                continue
+            ratio = p_cur / p_prev
+
+            if ratio < 0.6:
+                mult = p_prev / p_cur
+                for target in COMMON_SPLIT_RATIOS:
+                    if abs(mult - target) / target <= 0.05:
+                        status, ev_type, ev_ratio, src, ev_date = _match(sid, d_cur)
+                        candidates.append({
+                            "stock_id": sid, "date": d_cur, "prev_close": p_prev, "close": p_cur,
+                            "direction": "down", "multiplier": float(round(mult)), "reason": f"split_{target:g}x",
+                            "status": status, "event_type": ev_type, "event_ratio": ev_ratio, "event_source": src, "event_date": ev_date,
+                        })
+                        break
+            elif ratio > 1.2:
+                mult = p_cur / p_prev
+                for target in COMMON_REDUCTION_RATIOS:
+                    if abs(mult - target) / target <= 0.05:
+                        status, ev_type, ev_ratio, src, ev_date = _match(sid, d_cur)
+                        candidates.append({
+                            "stock_id": sid, "date": d_cur, "prev_close": p_prev, "close": p_cur,
+                            "direction": "up", "multiplier": float(1.0 / target), "reason": f"reduction_{target:g}x",
+                            "status": status, "event_type": ev_type, "event_ratio": ev_ratio, "event_source": src, "event_date": ev_date,
+                        })
+                        break
+
+    cand_cols = [
+        "stock_id", "date", "prev_close", "close", "direction", "multiplier",
+        "reason", "status", "event_type", "event_ratio", "event_source", "event_date",
+    ]
+    df_cand = pd.DataFrame(candidates, columns=cand_cols)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "corporate_action_candidates.csv"
+    df_cand.to_csv(out_path, index=False, encoding="utf-8")
+
+    n_confirmed = int((df_cand["status"] == "confirmed").sum()) if not df_cand.empty else 0
+    n_unresolved = int((df_cand["status"] == "unresolved").sum()) if not df_cand.empty else 0
+
+    # 對照第一輪 38 筆減資候選
+    r1_file = out_dir / "corporate_actions_detected.csv"
+    r1_confirmed = 0
+    r1_vetoed = 0
+    if r1_file.exists():
+        df_r1 = pd.read_csv(r1_file)
+        df_r1_red = df_r1[df_r1["direction"] == "up"]
+        for _, r in df_r1_red.iterrows():
+            st, _, _, _, _ = _match(str(r["stock_id"]).zfill(4), str(r["date"]))
+            if st == "confirmed":
+                r1_confirmed += 1
+            else:
+                r1_vetoed += 1
+
+    top20_unresolved = df_cand[df_cand["status"] == "unresolved"].head(20).to_dict(orient="records") if not df_cand.empty else []
+
+    return {
+        "total_candidates": len(df_cand),
+        "confirmed_count": n_confirmed,
+        "unresolved_count": n_unresolved,
+        "r1_38_reduction_confirmed": r1_confirmed,
+        "r1_38_reduction_vetoed": r1_vetoed,
+        "top20_unresolved": top20_unresolved,
+        "candidates_csv": str(out_path),
+    }
 
 
 def compute_holding_return_adjusted(
@@ -408,79 +552,178 @@ def compute_stock_forward_returns(
     corp_actions_map: dict[str, float] | None = None,
     div_yield_at_sig: float = 0.0,
     cost: float = 0.006,
+    delist_map: dict[str, str] | None = None,
+    unadj_price_dict: dict[str, float] | None = None,
 ) -> dict[str, any]:
-    """計算單檔股票的前瞻報酬，含 T+1 進場、到期 T+1 出場、公司行動還原與不可成交政策。
+    """計算單檔股票的前瞻報酬，含 T+1 進場、到期 T+1 出場、右設限整月排除與下市結算。
+    狀態欄位：
+    - entry_status: filled_T1 / filled_T2 / filled_T3 / unfilled
+    - exit_status_{h}: filled / delayed / unresolved / right_censored
+    - valuation_status_{h}: realized / last_available / delisted / right_censored
     """
     res = {}
-    corp_map = corp_actions_map or {}
+    delist_d = delist_map.get(sid) if delist_map else None
 
     entry_d_ideal = get_next_trading_day(sig_date, all_trading_dates, date_to_idx)
-    if entry_d_ideal is None:
+    if entry_d_ideal is None or entry_d_ideal not in date_to_idx:
+        res["entry_status"] = "unfilled"
         for h in target_dates:
             res[f"ret_{h}"] = None
             res[f"ret_{h}_tr"] = None
             res[f"ret_{h}_net"] = None
+            res[f"exit_status_{h}"] = "unresolved"
+            res[f"valuation_status_{h}"] = "unresolved"
             res[f"exit_reason_{h}"] = "none"
             res[f"ret_{h}_old"] = None
+            res[f"ret_{h}_cons"] = None
         return res
 
-    p_entry, actual_entry_d, entry_status = resolve_execution_price(
-        price_dict, all_trading_dates, date_to_idx, entry_d_ideal, max_shift_days=3
-    )
+    # 進場嘗試窗口：T+1, T+2, T+3（有價且 > 0 即可成交）
+    start_idx = date_to_idx[entry_d_ideal]
+    p_entry = None
+    actual_entry_d = None
+    entry_status = "unfilled"
+
+    for offset in range(3):
+        cur_idx = start_idx + offset
+        if cur_idx >= len(all_trading_dates):
+            break
+        d = all_trading_dates[cur_idx]
+        p = price_dict.get(d)
+        if p is not None and p > 0:
+            p_entry = p
+            actual_entry_d = d
+            entry_status = f"filled_T{offset + 1}"
+            break
+
+    res["entry_status"] = entry_status
+
+    # 保守情境進場（接近漲跌停界線延後 1 日）
+    p_entry_cons = None
+    for offset in range(3):
+        cur_idx = start_idx + offset
+        if cur_idx >= len(all_trading_dates):
+            break
+        d = all_trading_dates[cur_idx]
+        p = price_dict.get(d)
+        if p is not None and p > 0:
+            if cur_idx > 0:
+                prev_d = all_trading_dates[cur_idx - 1]
+                prev_p = price_dict.get(prev_d)
+                if prev_p and prev_p > 0 and abs(p / prev_p - 1.0) >= 0.095:
+                    continue
+            p_entry_cons = p
+            break
 
     for h, tgt_d in target_dates.items():
+        months = int(h.replace("m", ""))
+
         # 舊同日收盤報酬（供對照）
-        p_sig_old = price_dict.get(sig_date)
-        p_tgt_old = price_dict.get(tgt_d) if tgt_d else None
+        p_sig_old = unadj_price_dict.get(sig_date) if unadj_price_dict else price_dict.get(sig_date)
+        p_tgt_old = (unadj_price_dict.get(tgt_d) if unadj_price_dict else price_dict.get(tgt_d)) if tgt_d else None
         ret_old = (p_tgt_old / p_sig_old - 1.0) if (p_sig_old and p_tgt_old and p_sig_old > 0 and p_tgt_old > 0) else None
         res[f"ret_{h}_old"] = ret_old
 
-        if tgt_d is None:
+        # 計算日曆月到期預定執行日
+        tgt_exec_d, is_censored = get_target_execution_date(sig_date, months, all_trading_dates, date_to_idx)
+        if is_censored or tgt_exec_d is None:
             res[f"ret_{h}"] = None
             res[f"ret_{h}_tr"] = None
             res[f"ret_{h}_net"] = None
-            res[f"exit_reason_{h}"] = "none"
+            res[f"exit_status_{h}"] = "right_censored"
+            res[f"valuation_status_{h}"] = "right_censored"
+            res[f"exit_reason_{h}"] = "right_censored"
+            res[f"ret_{h}_cons"] = None
             continue
 
-        # 若進場端未成交：記現金 0%
+        # 進場未成交：現金 0%
         if p_entry is None or actual_entry_d is None:
             res[f"ret_{h}"] = 0.0
             res[f"ret_{h}_tr"] = 0.0
             res[f"ret_{h}_net"] = 0.0
-            res[f"exit_reason_{h}"] = entry_status  # untradeable_no_price / untradeable_limit_locked
+            res[f"exit_status_{h}"] = "unresolved"
+            res[f"valuation_status_{h}"] = "realized"
+            res[f"exit_reason_{h}"] = "unfilled"
+            res[f"ret_{h}_cons"] = 0.0
             continue
 
-        exit_d_ideal = get_next_trading_day(tgt_d, all_trading_dates, date_to_idx)
-        if exit_d_ideal is None:
-            exit_d_ideal = tgt_d
+        # 下市判定
+        if delist_d is not None and delist_d <= tgt_exec_d:
+            if delist_d <= actual_entry_d:
+                res[f"ret_{h}"] = 0.0
+                res[f"ret_{h}_tr"] = 0.0
+                res[f"ret_{h}_net"] = 0.0
+                res[f"exit_status_{h}"] = "unresolved"
+                res[f"valuation_status_{h}"] = "delisted"
+                res[f"exit_reason_{h}"] = "delisted"
+                res[f"ret_{h}_cons"] = 0.0
+                continue
+            else:
+                valid_before_delist = [c for d, c in price_rows if actual_entry_d <= d <= delist_d and c > 0]
+                p_last = valid_before_delist[-1] if valid_before_delist else p_entry
+                r_final = p_last / p_entry - 1.0
+                res[f"ret_{h}"] = float(r_final)
+                res[f"ret_{h}_tr"] = float(r_final)
+                res[f"ret_{h}_net"] = float(r_final - cost)
+                res[f"exit_status_{h}"] = "unresolved"
+                res[f"valuation_status_{h}"] = "delisted"
+                res[f"exit_reason_{h}"] = "delisted"
+                res[f"ret_{h}_cons"] = float(r_final)
+                continue
 
-        p_exit, actual_exit_d, exit_status = resolve_execution_price(
-            price_dict, all_trading_dates, date_to_idx, exit_d_ideal, max_shift_days=3
-        )
+        # 出場嘗試窗口：tgt_exec_d, +1, +2
+        exit_start_idx = date_to_idx.get(tgt_exec_d)
+        p_exit = None
+        exit_status = "unresolved"
+        valuation_status = "unresolved"
 
-        if p_exit is not None and actual_exit_d is not None:
-            # 正常成交或順延成交
-            r_calc, adj_reason = compute_holding_return_adjusted(
-                price_rows, actual_entry_d, actual_exit_d, corp_map
-            )
-            r_final = r_calc if r_calc is not None else 0.0
-            final_reason = "normal" if (entry_status == "ok" and exit_status == "ok" and adj_reason == "normal") else (
-                "shifted" if (entry_status == "shifted" or exit_status == "shifted") else adj_reason
-            )
+        if exit_start_idx is not None:
+            for offset in range(3):
+                cur_idx = exit_start_idx + offset
+                if cur_idx >= len(all_trading_dates):
+                    break
+                d = all_trading_dates[cur_idx]
+                p = price_dict.get(d)
+                if p is not None and p > 0:
+                    p_exit = p
+                    exit_status = "filled" if offset == 0 else "delayed"
+                    valuation_status = "realized"
+                    break
+
+        if p_exit is not None:
+            r_final = p_exit / p_entry - 1.0
         else:
-            # 出場端不可成交/缺價 -> 用最後可得價結算（只往回找，不往未來找）
-            valid_before_exit = [d for d, c in price_rows if actual_entry_d <= d <= exit_d_ideal and c > 0]
-            if len(valid_before_exit) >= 2:
-                last_d = valid_before_exit[-1]
-                r_calc, _ = compute_holding_return_adjusted(price_rows, actual_entry_d, last_d, corp_map)
-                r_final = r_calc if r_calc is not None else 0.0
-                final_reason = "last_available"
+            # 出場 unresolved：以到期日前最後可得還原價估值，不得重設為 0%
+            valid_before_exit = [c for d, c in price_rows if actual_entry_d <= d <= tgt_exec_d and c > 0]
+            if valid_before_exit:
+                p_last = valid_before_exit[-1]
+                r_final = p_last / p_entry - 1.0
             else:
                 r_final = 0.0
-                final_reason = exit_status
+            exit_status = "unresolved"
+            valuation_status = "last_available"
 
-        # 殖利率近似與扣成本
-        months = int(h.replace("m", ""))
+        # 保守情境出場計算
+        r_cons = r_final
+        if p_entry_cons is not None and exit_start_idx is not None:
+            p_exit_cons = None
+            for offset in range(3):
+                cur_idx = exit_start_idx + offset
+                if cur_idx >= len(all_trading_dates):
+                    break
+                d = all_trading_dates[cur_idx]
+                p = price_dict.get(d)
+                if p is not None and p > 0:
+                    if cur_idx > 0:
+                        prev_d = all_trading_dates[cur_idx - 1]
+                        prev_p = price_dict.get(prev_d)
+                        if prev_p and prev_p > 0 and abs(p / prev_p - 1.0) >= 0.095:
+                            continue
+                    p_exit_cons = p
+                    break
+            if p_exit_cons is not None:
+                r_cons = p_exit_cons / p_entry_cons - 1.0
+
         dy = div_yield_at_sig if (div_yield_at_sig is not None and not np.isnan(div_yield_at_sig)) else 0.0
         r_tr = float(r_final + (dy / 100.0) * (months / 12.0))
         r_net = float(r_tr - cost)
@@ -488,7 +731,10 @@ def compute_stock_forward_returns(
         res[f"ret_{h}"] = float(r_final)
         res[f"ret_{h}_tr"] = r_tr
         res[f"ret_{h}_net"] = r_net
-        res[f"exit_reason_{h}"] = final_reason
+        res[f"ret_{h}_cons"] = float(r_cons)
+        res[f"exit_status_{h}"] = exit_status
+        res[f"valuation_status_{h}"] = valuation_status
+        res[f"exit_reason_{h}"] = exit_status if valuation_status == "realized" else valuation_status
 
     return res
 
@@ -543,6 +789,7 @@ def block_bootstrap_paired_diff(
         "mean_diff": mean_diff,
         "median_diff": median_diff,
         "win_rate": win_rate,
+        "p_child_gt_parent": win_rate,
         "ci_95_lower": ci_lower,
         "ci_95_upper": ci_upper,
         "n_blocks": num_blocks,
@@ -712,3 +959,26 @@ def compute_drifted_portfolio_equity_curve(
         }
 
     return equity_df, port_metrics
+
+
+# ---------------------------------------------------------------------------
+# G. 等資金分批報酬公式
+# ---------------------------------------------------------------------------
+
+def compute_equal_dollar_tranche_return(
+    tranche_prices: list[float],
+    exit_price: float,
+) -> float:
+    """等資金分批報酬公式：
+    每一批投入相同金額 D，買入股數為 D / P_i。
+    總投入為 K * D，到期總市值為 P_exit * sum(D / P_i) = D * P_exit * sum(1 / P_i)。
+    總報酬為 (總市值 / 總投入) - 1 = (P_exit / K) * sum(1 / P_i) - 1 = P_exit * mean(1 / P_i) - 1.0。
+    """
+    if not tranche_prices or exit_price <= 0:
+        return 0.0
+    for p in tranche_prices:
+        if p <= 0:
+            return 0.0
+    inv_mean = float(np.mean([1.0 / p for p in tranche_prices]))
+    return float(exit_price * inv_mean - 1.0)
+

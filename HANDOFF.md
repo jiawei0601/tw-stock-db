@@ -19,7 +19,7 @@ pip install -r requirements.txt
 python refresh_daily.py              # 每日刷新：12 步 build/export 鏈 + 發布 dashboard.html
                                       # 到公開 GitHub Pages（詳見 AGENTS.md 相依順序）
 python build_valuation.py --screen   # 估值篩選表（--import-cache/--fetch 補資料，見下）
-python backtest_valuation.py --out backtest/   # point-in-time 月頻回測
+python backtest_valuation.py --out backtest/   # 使用公告延遲代理與當前存活成分股的月頻回顧研究
 python -m pytest tests/ -q           # 全專案測試（236+ 個，跑前需先跑過 build_db.py）
 ```
 
@@ -55,7 +55,7 @@ band_ok=123。已修過的坑（見 `docs/handoff-archive.md` 末尾原文細節
 未排入每日鏈。
 
 **回測框架**（`backtest_valuation.py` + 動能延伸，agy 實作、Claude Code 逐輪審查）：
-point-in-time 月頻回測，2022–2026 vs 等權 universe：
+使用公告延遲代理與當前存活成分股的月頻回顧研究，2022–2026 vs 等權 universe：
 - 純估值篩選（L0/L1/L2）：無正向邊際貢獻，L2（加營收同向）相對 L1 無邊際貢獻——
   結論：估值篩選器只有描述力、沒有預測力，當清單用、不當買訊；
 - 純動能（C1）：勝率 67%、超額中位 +2.4%；動能股裡再挑便宜的（C2）勝率掉到 30%——
@@ -148,3 +148,5 @@ GitHub Pages）。
 - 2026-09-07 22:33 第二輪審查（Codex gpt-6-astra high，重跑成功）**總判定「需改後執行」**：工單方向多數正確，但尚未構成一致可驗收的修復規格。**必改清單**：(1) 消除 A／C 兩版不可成交政策與缺價退出衝突、刪掉「±9.5% 即鎖死」的確定判斷；(2) B 向上減資倍率 `S=1/q` 代數上恆使事件日報酬＝0，事件比例須由獨立事件證據（股份比＋現金對價）決定，價差只能標候選；(3) D 凍結 screen 名單仍漏掉 16 檔無 PER 股票，母體應改凍結估值篩選前的完整候選名單並報漏斗；(4) F 集中度重抽未估信賴區間、前 5／10 用不同月份且排名前剔除未來缺報酬股，統計上無法區分優劣；(5) 分批進場以價格算術平均計酬會低估，應按各次買入股數計；(6) 兩個同名 G 的「不重跑／重跑」需統一。結論性措辭「訊號日買最好、固定到期最好」尚不成立。審查原文 `docs/tasks/reports/codex-review-2.md`。
 
 - 2026-09-08 00:xx 第一輪有效性修復（agy 22:03 產出）以**草稿**commit：sonnet 審查 request_changes（候選=確認、bootstrap 未接線、全策略交集、9.5% 鎖死），Codex 第二輪審查同判「需改後執行」。`validity_summary.md` 的數字**不可引用**。第二輪工單 `docs/tasks/backtest-validity-repair-2.md`：改用 FinMind 還原股價與分割／減資／下市事件表（--fetch-events／--fetch-adj，約 240 次請求），事件表為主、跳動只做候選。順帶發現：測試裡的三檔孤兒列 2867/4130/5371 正是 2026 下市股（FinMind TaiwanStockDelisting），不該清掉，應保留供回測退出處理。
+
+- 2026-09-08 01:40 第二輪有效性修復完成（agy 01:07 產出、sonnet 驗收 request_changes 三項皆為揭露／資料品質，補揭露後納入，73 測試綠）。**修復後可引用數字**（6 個月、還原價、T+1、父子共同月、6 月區塊 bootstrap）：D2→D3 品質排雷 -0.60%（CI 跨 0，不成立）；D3→D5 營收為正 +2.84%（CI [+1.1, +4.1]，成立）；C1→MOM_12_1 全池原始 12−1 動能 +3.55%（CI [+0.7, +6.6]，成立）；C1→C1_12_1 −0.08%（lookback 無差）→ 差異來自「全池選股」而非「拉長視窗」。執行面：E0（T+1）與 E1b 等拉回幾乎打平（−0.11／+0.36），出場規則在再投資口徑下少賺 2–4 個百分點而非 10，「訊號日買最好、不出場最好」改為「差異不大、無簡單規則明顯勝出」。待辦：fm_corporate_events 抓取端編碼、5305 還原價、清理 compute_holding_return_adjusted、日排程 daily_prices 落後、Codex 措辭建議其餘項目。

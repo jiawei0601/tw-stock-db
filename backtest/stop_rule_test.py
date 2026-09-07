@@ -1,95 +1,91 @@
+from pathlib import Path
 import sqlite3
 import pandas as pd
 import numpy as np
 
-DB = "C:/CLAUDE/專案-投資/tw-stock-db/data/tw_stocks.db"
-SIG = "C:/CLAUDE/專案-投資/tw-stock-db/backtest/signals.csv"
+DB = Path(__file__).resolve().parent.parent / "data" / "tw_stocks.db"
+SIG = Path(__file__).resolve().parent / "signals.csv"
+OUT_DIR = Path(__file__).resolve().parent
 
 con = sqlite3.connect(DB)
 sig = pd.read_csv(SIG, encoding="utf-8")
 
 # select signal months: D5==True and ret_3m not null
 sig = sig[(sig["D5"] == True) & (sig["ret_3m"].notna())].copy()
+sig["stock_id"] = sig["stock_id"].astype(str).str.zfill(4)
+sig["signal_date"] = pd.to_datetime(sig["signal_date"])
 
-# top 5 by rel_mom_rank per signal_date (assume higher rank = better; verify direction)
-# rel_mom_rank likely 1 = best. We'll take the 5 lowest rank values (rank 1..5) as "highest" momentum rank position.
-# To be safe, check both directions by looking at correlation with mom would need extra data; use ascending rank (rank 1 = top).
-# rel_mom_rank observed range ~0.75-1.0 (percentile); higher = stronger relative momentum -> take top (largest)
+# top 5 by rel_mom_rank per signal_date
 sig_sorted = sig.sort_values(["signal_date", "rel_mom_rank"], ascending=[True, False])
 groups = sig_sorted.groupby("signal_date", group_keys=False).head(5).reset_index(drop=True)
 
 months = sorted(groups["signal_date"].unique())
 print(f"# signal months: {len(months)}")
 
-# preload price data for needed stock_ids
+# preload price data for needed stock_ids from fm_price_adj_daily
 stock_ids = groups["stock_id"].astype(str).unique().tolist()
 placeholders = ",".join("?" for _ in stock_ids)
 prices = pd.read_sql(
-    f"SELECT stock_id, date, close FROM fm_price_daily WHERE stock_id IN ({placeholders})",
+    f"SELECT stock_id, date, close_adj AS close FROM fm_price_adj_daily WHERE stock_id IN ({placeholders}) ORDER BY stock_id, date",
     con, params=stock_ids
 )
-prices["stock_id"] = prices["stock_id"].astype(str)
+
+all_prices = pd.read_sql(
+    "SELECT stock_id, date, close_adj AS close FROM fm_price_adj_daily WHERE close_adj > 0 ORDER BY date, stock_id",
+    con,
+)
+con.close()
+
+prices["stock_id"] = prices["stock_id"].astype(str).str.zfill(4)
 prices["date"] = pd.to_datetime(prices["date"])
 prices = prices.sort_values(["stock_id", "date"]).reset_index(drop=True)
 price_by_stock = {sid: df.reset_index(drop=True) for sid, df in prices.groupby("stock_id")}
 
-groups["stock_id"] = groups["stock_id"].astype(str)
+all_prices["date"] = pd.to_datetime(all_prices["date"])
+all_prices["ret"] = all_prices.groupby("stock_id")["close"].pct_change()
+daily_univ = all_prices.groupby("date")["ret"].mean().fillna(0.0)
+univ_cum = (1.0 + daily_univ).cumprod()
+univ_cum_map = dict(zip(univ_cum.index, univ_cum.values))
+
+def get_univ_return(d_from: pd.Timestamp, d_to: pd.Timestamp) -> float:
+    if d_from == d_to:
+        return 0.0
+    c_from = univ_cum_map.get(d_from)
+    c_to = univ_cum_map.get(d_to)
+    if c_from and c_to and c_from > 0:
+        return float(c_to / c_from - 1.0)
+    return 0.0
+
+groups["stock_id"] = groups["stock_id"].astype(str).str.zfill(4)
 groups["signal_date"] = pd.to_datetime(groups["signal_date"])
 
-def get_series(stock_id, start_date, end_date=None):
-    df = price_by_stock.get(stock_id)
-    if df is None:
-        return None
-    mask = df["date"] >= start_date
-    if end_date is not None:
-        mask &= df["date"] <= end_date
-    return df.loc[mask].reset_index(drop=True)
-
-def nearest_close_on_or_after(stock_id, target_date, horizon_days=400):
-    df = price_by_stock.get(stock_id)
-    if df is None:
-        return None, None
-    sub = df[(df["date"] >= target_date)]
-    if sub.empty:
-        return None, None
-    row = sub.iloc[0]
-    return row["date"], row["close"]
-
-def entry_close(stock_id, signal_date):
-    df = price_by_stock.get(stock_id)
-    if df is None:
-        return None, None
-    sub = df[df["date"] == signal_date]
-    if not sub.empty:
-        return sub.iloc[0]["date"], sub.iloc[0]["close"]
-    # fallback: nearest on/after
-    return nearest_close_on_or_after(stock_id, signal_date)
-
-def exit_3m_close(stock_id, signal_date):
-    # exit = last trading day of the month that is 3 calendar months after signal_date's month
-    df = price_by_stock.get(stock_id)
-    if df is None:
-        return None, None
-    target_period = (signal_date.to_period("M") + 3)
-    sub = df[df["date"].dt.to_period("M") == target_period]
-    if sub.empty:
-        return None, None
-    row = sub.iloc[-1]
-    return row["date"], row["close"]
-
-# ---- Step 1: verify baseline hold matches ret_3m ----
-verify_rows = []
-positions = []  # list of dict per position: signal_date, stock_id, entry_date, entry_price, series (full to +3m), bench_3m, ret_3m(reported)
+# ---- Step 1: verify baseline hold matches ret_3m (T+1 entry and exit) ----
+positions = []
 for _, row in groups.iterrows():
     sid = row["stock_id"]
     sdate = row["signal_date"]
-    edate, eprice = entry_close(sid, sdate)
-    if edate is None or eprice is None or eprice == 0:
+    df = price_by_stock.get(sid)
+    if df is None:
         continue
-    xdate, xprice = exit_3m_close(sid, sdate)
-    if xdate is None:
+    sub_e = df[df["date"] == sdate]
+    if sub_e.empty:
         continue
+    i0 = sub_e.index[0]
+    if i0 + 1 >= len(df):
+        continue
+    edate = df.iloc[i0 + 1]["date"]
+    eprice = float(df.iloc[i0 + 1]["close"])
+
+    target_period = sdate.to_period("M") + 3
+    sub_x = df[df["date"].dt.to_period("M") == target_period]
+    if sub_x.empty:
+        continue
+    mx_idx = sub_x.index[-1]
+    x_idx = mx_idx + 1 if (mx_idx + 1 < len(df)) else mx_idx
+    xdate = df.iloc[x_idx]["date"]
+    xprice = float(df.iloc[x_idx]["close"])
     computed_ret = xprice / eprice - 1.0
+
     positions.append(dict(
         signal_date=sdate, stock_id=sid, entry_date=edate, entry_price=eprice,
         exit3m_date=xdate, exit3m_price=xprice, computed_ret3m=computed_ret,
@@ -131,11 +127,12 @@ def simulate_rule(pos, rule):
 
     entry_price = pos["entry_price"]
     n = len(trade_days)
+    maturity_date = trade_days.iloc[n - 1]["date"]
 
     if rule == "none":
         exit_idx = n - 1
         ret = trade_days.iloc[exit_idx]["close"] / entry_price - 1.0
-        return dict(ret=ret, exited_early=False, hold_days=n - 1, exit_date=trade_days.iloc[exit_idx]["date"])
+        return dict(ret=ret, ret_cash=ret, ret_univ=ret, exited_early=False, hold_days=n - 1, exit_date=trade_days.iloc[exit_idx]["date"])
 
     # compute MA using full 'path' (which has lookback for pre-entry days), aligned by date
     path = path.sort_values("date").reset_index(drop=True)
@@ -148,7 +145,7 @@ def simulate_rule(pos, rule):
     below20_streak = 0
     below60_streak = 0
     running_max_close = entry_price
-    exit_i = None  # index within trade_days (0=entry day)
+    trigger_i = None
 
     for i in range(n):
         d = trade_days.iloc[i]["date"]
@@ -156,7 +153,6 @@ def simulate_rule(pos, rule):
         pidx = path_idx_of_date[d]
 
         if i == 0:
-            # entry day: no check, but initialize running max
             running_max_close = c
             continue
 
@@ -186,25 +182,37 @@ def simulate_rule(pos, rule):
                 triggered = True
 
         if triggered:
-            exit_i = i
+            trigger_i = i
             break
 
-    if exit_i is None:
+    if trigger_i is None:
         exit_i = n - 1
         exited_early = False
     else:
-        exited_early = True
+        # 收盤觸發、次日收盤成交（T+1）
+        exit_i = min(trigger_i + 1, n - 1)
+        exited_early = (exit_i < n - 1)
 
+    exit_date = trade_days.iloc[exit_i]["date"]
     exit_price = trade_days.iloc[exit_i]["close"]
-    ret_to_exit = exit_price / entry_price - 1.0
+    stock_ret = exit_price / entry_price - 1.0
 
     if exited_early:
-        # remaining period = cash (0 return) -> total position return over full 3m = ret_to_exit
-        ret = ret_to_exit
+        ret_cash = stock_ret
+        univ_reinvest = get_univ_return(exit_date, maturity_date)
+        ret_univ = (exit_price / entry_price) * (1.0 + univ_reinvest) - 1.0
     else:
-        ret = ret_to_exit
+        ret_cash = stock_ret
+        ret_univ = stock_ret
 
-    return dict(ret=ret, exited_early=exited_early, hold_days=exit_i, exit_date=trade_days.iloc[exit_i]["date"])
+    return dict(
+        ret=ret_cash,
+        ret_cash=ret_cash,
+        ret_univ=ret_univ,
+        exited_early=exited_early,
+        hold_days=exit_i,
+        exit_date=exit_date,
+    )
 
 
 rules = ["none", "R1", "R2", "R3", "R4", "R5"]
@@ -228,6 +236,8 @@ for r in rules:
     df = sim_df[r]
     g = df.groupby("signal_date").agg(
         port_ret=("ret", "mean"),
+        port_ret_cash=("ret_cash", "mean"),
+        port_ret_univ=("ret_univ", "mean"),
         bench_ret=("bench_3m", "mean"),
         n_exit_early=("exited_early", "sum"),
         avg_hold=("hold_days", "mean"),
@@ -238,22 +248,27 @@ for r in rules:
 summary_rows = []
 for r in rules:
     g = month_stats[r].copy()
-    port = g["port_ret"]
+    port_cash = g["port_ret_cash"]
+    port_univ = g["port_ret_univ"]
     bench = g["bench_ret"]
-    excess = port - bench
+    excess_cash = port_cash - bench
+    excess_univ = port_univ - bench
 
     summary_rows.append(dict(
         rule=r,
         n_months=len(g),
-        mean_ret=port.mean(),
-        median_ret=port.median(),
-        winrate_abs=(port > 0).mean(),
-        winrate_vs_bench=(port > bench).mean(),
-        median_excess=excess.median(),
-        worst=port.min(),
-        best=port.max(),
-        p5=port.quantile(0.05),
-        p95=port.quantile(0.95),
+        mean_ret_cash=port_cash.mean(),
+        median_ret_cash=port_cash.median(),
+        mean_ret_univ=port_univ.mean(),
+        median_ret_univ=port_univ.median(),
+        winrate_abs=(port_cash > 0).mean(),
+        winrate_vs_bench=(port_cash > bench).mean(),
+        median_excess_cash=excess_cash.median(),
+        median_excess_univ=excess_univ.median(),
+        worst_cash=port_cash.min(),
+        best_cash=port_cash.max(),
+        worst_univ=port_univ.min(),
+        best_univ=port_univ.max(),
         avg_early_exit_count=g["n_exit_early"].mean() if r != "none" else 0.0,
         avg_hold_days=g["avg_hold"].mean(),
     ))
@@ -261,14 +276,15 @@ for r in rules:
 summary_df = pd.DataFrame(summary_rows)
 
 # ---- 回吐保留度 ----
-# Use "none" (baseline) month returns to classify months as bench-negative / bench-positive
-base = month_stats["none"][["signal_date", "bench_ret", "port_ret"]].rename(columns={"port_ret": "base_port_ret"})
+base = month_stats["none"][["signal_date", "bench_ret", "port_ret_cash"]].rename(columns={"port_ret_cash": "base_port_ret"})
 
 retention_rows = []
 for r in rules:
     if r == "none":
         continue
-    g = month_stats[r][["signal_date", "port_ret"]].rename(columns={"port_ret": "rule_port_ret"})
+    g = month_stats[r][["signal_date", "port_ret_cash", "port_ret_univ"]].rename(
+        columns={"port_ret_cash": "rule_port_cash", "port_ret_univ": "rule_port_univ"}
+    )
     m = base.merge(g, on="signal_date")
     neg_months = m[m["bench_ret"] < 0]
     pos_months = m[m["bench_ret"] > 0]
@@ -276,45 +292,51 @@ for r in rules:
         rule=r,
         n_neg_months=len(neg_months),
         base_avg_in_neg=neg_months["base_port_ret"].mean(),
-        rule_avg_in_neg=neg_months["rule_port_ret"].mean(),
+        rule_cash_in_neg=neg_months["rule_port_cash"].mean(),
+        rule_univ_in_neg=neg_months["rule_port_univ"].mean(),
         n_pos_months=len(pos_months),
         base_avg_in_pos=pos_months["base_port_ret"].mean(),
-        rule_avg_in_pos=pos_months["rule_port_ret"].mean(),
-        pos_month_giveup=(pos_months["base_port_ret"] - pos_months["rule_port_ret"]).mean(),
+        rule_cash_in_pos=pos_months["rule_port_cash"].mean(),
+        rule_univ_in_pos=pos_months["rule_port_univ"].mean(),
+        pos_month_giveup_cash=(pos_months["base_port_ret"] - pos_months["rule_port_cash"]).mean(),
+        pos_month_giveup_univ=(pos_months["base_port_ret"] - pos_months["rule_port_univ"]).mean(),
     ))
 
 retention_df = pd.DataFrame(retention_rows)
 
 # ---- R1 per-month diff vs baseline ----
-r1_g = month_stats["R1"][["signal_date", "port_ret"]].rename(columns={"port_ret": "r1_ret"})
-base_g = month_stats["none"][["signal_date", "port_ret", "bench_ret"]].rename(columns={"port_ret": "base_ret"})
+r1_g = month_stats["R1"][["signal_date", "port_ret_cash", "port_ret_univ"]].rename(
+    columns={"port_ret_cash": "r1_ret_cash", "port_ret_univ": "r1_ret_univ"}
+)
+base_g = month_stats["none"][["signal_date", "port_ret_cash", "bench_ret"]].rename(columns={"port_ret_cash": "base_ret"})
 r1_compare = base_g.merge(r1_g, on="signal_date")
-r1_compare["diff"] = r1_compare["r1_ret"] - r1_compare["base_ret"]
-r1_compare_sorted = r1_compare.sort_values("diff")
+r1_compare["diff_cash"] = r1_compare["r1_ret_cash"] - r1_compare["base_ret"]
+r1_compare["diff_univ"] = r1_compare["r1_ret_univ"] - r1_compare["base_ret"]
+r1_compare_sorted = r1_compare.sort_values("diff_cash")
 
-worst5 = r1_compare_sorted.head(5)  # R1 hurts most (most negative diff)
-best5 = r1_compare_sorted.tail(5).sort_values("diff", ascending=False)  # R1 saves most
+worst5 = r1_compare_sorted.head(5)
+best5 = r1_compare_sorted.tail(5).sort_values("diff_cash", ascending=False)
 
 # ---- Print everything ----
 pd.set_option("display.float_format", lambda x: f"{x:.4f}")
 pd.set_option("display.width", 200)
 
-print("\n===== 規則比較總表 =====")
-print(summary_df.to_string(index=False))
+print("\n===== 規則比較總表（並列現金與 Universe 轉入口徑）=====")
+print(summary_df[["rule", "n_months", "mean_ret_cash", "median_ret_cash", "mean_ret_univ", "median_ret_univ", "winrate_abs", "winrate_vs_bench", "avg_early_exit_count", "avg_hold_days"]].to_string(index=False))
 
 print("\n===== 回吐保留度（基準持有為負 / 為正月份）=====")
 print(retention_df.to_string(index=False))
 
-print("\n===== R1 vs 基準：差異最大 5 個月（R1 救最多，diff 由負到正取前5為害最多；後5為救最多）=====")
+print("\n===== R1 vs 基準：差異最大 5 個月（現金口徑，R1 - 基準）=====")
 print("\n-- R1 害最多的 5 個月 (R1 - 基準 最負) --")
-print(worst5[["signal_date", "base_ret", "r1_ret", "diff", "bench_ret"]].to_string(index=False))
+print(worst5[["signal_date", "base_ret", "r1_ret_cash", "r1_ret_univ", "diff_cash", "bench_ret"]].to_string(index=False))
 print("\n-- R1 救最多的 5 個月 (R1 - 基準 最正) --")
-print(best5[["signal_date", "base_ret", "r1_ret", "diff", "bench_ret"]].to_string(index=False))
+print(best5[["signal_date", "base_ret", "r1_ret_cash", "r1_ret_univ", "diff_cash", "bench_ret"]].to_string(index=False))
 
-# save csv outputs for reference
-out_dir = "C:/Users/chang/AppData/Local/Temp/claude/C--CLAUDE/7a997c70-86d6-4e1a-9a5b-82831f164b00/scratchpad"
-summary_df.to_csv(f"{out_dir}/stop_rule_summary.csv", index=False)
-retention_df.to_csv(f"{out_dir}/stop_rule_retention.csv", index=False)
-r1_compare.to_csv(f"{out_dir}/stop_rule_R1_vs_base.csv", index=False)
+# save csv outputs to backtest directory
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+summary_df.to_csv(OUT_DIR / "stop_rule_summary.csv", index=False)
+retention_df.to_csv(OUT_DIR / "stop_rule_retention.csv", index=False)
+r1_compare.to_csv(OUT_DIR / "stop_rule_R1_vs_base.csv", index=False)
 
-print("\n輸出檔案已存至 scratchpad。")
+print(f"\n輸出檔案已存至 {OUT_DIR}。")

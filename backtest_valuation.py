@@ -29,11 +29,13 @@ import statistics
 import numpy as np
 import pandas as pd
 
+import build_valuation
 from backtest_validity import (
     filter_complete_month_signals,
     get_next_trading_day,
     resolve_execution_price,
     compute_stock_forward_returns,
+    generate_corporate_action_candidates,
     detect_corporate_actions_for_stock,
     compute_holding_return_adjusted,
     check_stock_eligibility,
@@ -43,6 +45,7 @@ from backtest_validity import (
     check_corp_action_in_per_window,
     block_bootstrap_paired_diff,
     compute_drifted_portfolio_equity_curve,
+    compute_equal_dollar_tranche_return,
 )
 
 DEFAULT_DB_PATH = Path(__file__).parent / "data" / "tw_stocks.db"
@@ -289,7 +292,7 @@ def compute_momentum(
 
 def compute_sub_relative_momentum(month_stock_records: list[dict]) -> None:
     """計算同月同 sub 等權 mom 與 rel_mom (mom − sub_mom)，就地更新 month_stock_records。"""
-    for period in ("3m", "1m"):
+    for period in ("3m", "1m", "12_1"):
         mom_col = f"mom_{period}"
         sub_col = f"sub_mom_{period}"
         rel_col = f"rel_mom_{period}"
@@ -440,6 +443,22 @@ def run_backtest(
     out_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
 
+    # 0. 公司行動雙向候選偵測並對照 fm_corporate_events (±3 交易日)
+    cand_res = generate_corporate_action_candidates(conn, out_dir)
+    cand_df = pd.read_csv(out_dir / "corporate_action_candidates.csv", dtype={"stock_id": str})
+    cand_df["stock_id"] = cand_df["stock_id"].astype(str).str.zfill(4)
+    confirmed_df = cand_df[cand_df["status"] == "confirmed"]
+    confirmed_events_map: dict[str, set[str]] = {}
+    for sid, grp in confirmed_df.groupby("stock_id"):
+        confirmed_events_map[sid] = set(grp["date"])
+
+    # 載入下市名單
+    try:
+        delist_rows = conn.execute("SELECT stock_id, date FROM fm_delisting").fetchall()
+        delist_map = {str(r[0]).zfill(4): r[1] for r in delist_rows}
+    except Exception:
+        delist_map = {}
+
     # 1. 取得 universe 股票池 (2026 存活成分股回顧回測，凍結於 universe_2026_survivors.csv)
     surv_file = out_dir / "universe_2026_survivors.csv"
     if surv_file.exists():
@@ -453,10 +472,25 @@ def run_backtest(
             "universe": "ai_chain;semiconductor",
             "sub": [sub_tmp.get(r[0], "其他") for r in u_rows],
             "first_close_date": None,
+            "listed_date": None,
         })
         conn_tmp.close()
-    universe_stocks = sorted(df_surv["stock_id"].astype(str).str.zfill(4).tolist())
-    first_close_date_map = dict(zip(df_surv["stock_id"].astype(str).str.zfill(4), df_surv["first_close_date"]))
+
+    # 母體改從 stock_sub_industry 半導體鏈與 ai_chain 清單的聯集取（不經 valuation_screen 過濾）
+    ai_stocks = set(str(k).zfill(4) for k in build_valuation.ai_chain_universe().keys())
+    all_sub_stocks = set(str(r[0]).zfill(4) for r in conn.execute("SELECT DISTINCT stock_id FROM stock_sub_industry"))
+    mother_union = ai_stocks | all_sub_stocks
+    surv_stock_set = set(df_surv["stock_id"].astype(str).str.zfill(4))
+    universe_stocks = sorted(list(mother_union | surv_stock_set))
+
+    universe_diff_info = {
+        "mother_union_count": len(mother_union),
+        "survivors_count": len(surv_stock_set),
+        "in_union_not_surv": sorted(list(mother_union - surv_stock_set)),
+        "in_surv_not_union": sorted(list(surv_stock_set - mother_union)),
+    }
+
+    first_close_date_map = dict(zip(df_surv["stock_id"].astype(str).str.zfill(4), df_surv.get("listed_date", df_surv.get("first_close_date"))))
     surv_sub_map = dict(zip(df_surv["stock_id"].astype(str).str.zfill(4), df_surv["sub"]))
 
     # 2. 取得 sub 產業映射
@@ -476,30 +510,29 @@ def run_backtest(
     for t, col in [
         ("per_daily", "date"),
         ("fm_price_daily", "date"),
+        ("fm_price_adj_daily", "date"),
         ("eps_quarterly", "quarter_end"),
         ("fm_revenue_monthly", "ym"),
     ]:
-        row = conn.execute(f"SELECT MIN({col}), MAX({col}), COUNT(*) FROM {t}").fetchone()
-        earliest_dates[t] = {
-            "min": row[0] if row else None,
-            "max": row[1] if row else None,
-            "count": row[2] if row else 0,
-        }
+        try:
+            row = conn.execute(f"SELECT MIN({col}), MAX({col}), COUNT(*) FROM {t}").fetchone()
+            earliest_dates[t] = {
+                "min": row[0] if row else None,
+                "max": row[1] if row else None,
+                "count": row[2] if row else 0,
+            }
+        except Exception:
+            earliest_dates[t] = {"min": None, "max": None, "count": 0}
 
-    # 4. 交易日曆與月訊號日
-    dates_df = pd.read_sql("SELECT DISTINCT date FROM fm_price_daily ORDER BY date", conn)
+    # 4. 交易日曆與月訊號日（以 fm_price_adj_daily 為準，無則降級為 fm_price_daily）
+    try:
+        dates_df = pd.read_sql("SELECT DISTINCT date FROM fm_price_adj_daily ORDER BY date", conn)
+    except Exception:
+        dates_df = pd.read_sql("SELECT DISTINCT date FROM fm_price_daily ORDER BY date", conn)
     all_trading_dates = dates_df["date"].tolist()
     date_to_idx = {d: i for i, d in enumerate(all_trading_dates)}
     dates_s = pd.to_datetime(dates_df["date"])
     month_signals = filter_complete_month_signals(all_trading_dates)
-
-    # 載入公司行動表
-    corp_actions_file = out_dir / "corporate_actions_detected.csv"
-    corp_actions_map: dict[str, dict[str, float]] = {}
-    if corp_actions_file.exists():
-        ca_df = pd.read_csv(corp_actions_file, dtype={"stock_id": str})
-        for _, r in ca_df.iterrows():
-            corp_actions_map.setdefault(str(r["stock_id"]).zfill(4), {})[str(r["date"])] = float(r["multiplier"])
 
     # 5. 批次載入 universe 相關資料至記憶體
     df_per = pd.read_sql(
@@ -517,17 +550,37 @@ def run_backtest(
     for sid, grp in df_per.groupby("stock_id"):
         div_yield_dict[sid] = dict(zip(grp["date"], grp["dividend_yield"]))
 
-    df_price = pd.read_sql(
+    # 報酬、動能（3 月、1 月、12-1 月）、均線：全部改用 fm_price_adj_daily
+    try:
+        df_price_adj = pd.read_sql(
+            "SELECT stock_id, date, close_adj AS close FROM fm_price_adj_daily WHERE close_adj > 0 ORDER BY stock_id, date",
+            conn,
+        )
+    except Exception:
+        df_price_adj = pd.read_sql(
+            "SELECT stock_id, date, close FROM fm_price_daily WHERE close > 0 ORDER BY stock_id, date",
+            conn,
+        )
+    df_price_adj["stock_id"] = df_price_adj["stock_id"].astype(str).str.zfill(4)
+    df_price_adj = df_price_adj[df_price_adj["stock_id"].isin(universe_stocks)]
+    price_rows_by_stock: dict[str, list[tuple[str, float]]] = {}
+    price_dict_by_stock: dict[str, dict[str, float]] = {}
+    for sid, grp in df_price_adj.groupby("stock_id"):
+        price_rows_by_stock[sid] = list(zip(grp["date"], grp["close"]))
+        price_dict_by_stock[sid] = dict(zip(grp["date"], grp["close"]))
+
+    # 未還原股價 (fm_price_daily)，供 PER 視窗與分割旗標偵測
+    df_price_unadj = pd.read_sql(
         "SELECT stock_id, date, close FROM fm_price_daily WHERE close > 0 ORDER BY stock_id, date",
         conn,
     )
-    df_price["stock_id"] = df_price["stock_id"].astype(str).str.zfill(4)
-    df_price = df_price[df_price["stock_id"].isin(universe_stocks)]
-    price_rows_by_stock: dict[str, list[tuple[str, float]]] = {}
-    price_dict_by_stock: dict[str, dict[str, float]] = {}
-    for sid, grp in df_price.groupby("stock_id"):
-        price_rows_by_stock[sid] = list(zip(grp["date"], grp["close"]))
-        price_dict_by_stock[sid] = dict(zip(grp["date"], grp["close"]))
+    df_price_unadj["stock_id"] = df_price_unadj["stock_id"].astype(str).str.zfill(4)
+    df_price_unadj = df_price_unadj[df_price_unadj["stock_id"].isin(universe_stocks)]
+    price_unadj_rows_by_stock: dict[str, list[tuple[str, float]]] = {}
+    price_unadj_dict_by_stock: dict[str, dict[str, float]] = {}
+    for sid, grp in df_price_unadj.groupby("stock_id"):
+        price_unadj_rows_by_stock[sid] = list(zip(grp["date"], grp["close"]))
+        price_unadj_dict_by_stock[sid] = dict(zip(grp["date"], grp["close"]))
 
     df_eps = pd.read_sql(
         "SELECT stock_id, quarter_end, eps FROM eps_quarterly WHERE eps IS NOT NULL ORDER BY stock_id, quarter_end",
@@ -563,6 +616,7 @@ def run_backtest(
     # 6. 逐月運算所有訊號與前瞻報酬
     all_eval_rows: list[dict] = []
     eval_stock_counts_per_month: list[int] = []
+    excluded_per_event_stock_months = 0
 
     horizon_offsets = {"3m": 3, "6m": 6, "12m": 12}
 
@@ -593,8 +647,6 @@ def run_backtest(
             dy_raw = div_yield_dict.get(sid, {}).get(sig_date)
             div_yield_at_sig = float(dy_raw) if (dy_raw is not None and not np.isnan(dy_raw)) else 0.0
 
-            corp_actions_for_stock = corp_actions_map.get(sid, {})
-
             stock_fwd = compute_stock_forward_returns(
                 sid=sid,
                 sig_date=sig_date,
@@ -603,14 +655,17 @@ def run_backtest(
                 price_rows=price_rows,
                 all_trading_dates=all_trading_dates,
                 date_to_idx=date_to_idx,
-                corp_actions_map=corp_actions_for_stock,
+                corp_actions_map=None,
                 div_yield_at_sig=div_yield_at_sig,
+                delist_map=delist_map,
+                unadj_price_dict=price_unadj_dict_by_stock.get(sid, {}),
             )
             fwd_rets = {h: stock_fwd[f"ret_{h}"] for h in ("3m", "6m", "12m")}
             fwd_rets_tr = {h: stock_fwd[f"ret_{h}_tr"] for h in ("3m", "6m", "12m")}
             fwd_rets_net = {h: stock_fwd[f"ret_{h}_net"] for h in ("3m", "6m", "12m")}
 
-            is_split = detect_split_flag(price_rows, sig_date)
+            # 分割旗標偵測用未還原價
+            is_split = detect_split_flag(price_unadj_rows_by_stock.get(sid, []), sig_date)
 
             eps_rows = eps_by_stock.get(sid, [])
             eps_cv, loss_q, eps_ttm_growth, n_eps_vis = compute_eps_metrics(eps_rows, sig_date)
@@ -618,26 +673,24 @@ def run_backtest(
             rev_rows = rev_by_stock.get(sid, [])
             rev_yoy_3m = compute_revenue_metrics(rev_rows, sig_date)
 
-            if check_corp_action_in_window(corp_actions_for_stock, tgt_date_3m, sig_date):
-                mom_3m = None
-            else:
-                mom_3m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_3m)
+            # 動能改用還原價，不需因事件記 NA
+            mom_3m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_3m)
+            mom_1m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_1m)
 
-            if check_corp_action_in_window(corp_actions_for_stock, tgt_date_1m, sig_date):
-                mom_1m = None
-            else:
-                mom_1m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_1m)
-
-            if tgt_date_12m is not None and tgt_date_1m is not None and not check_corp_action_in_window(corp_actions_for_stock, tgt_date_12m, tgt_date_1m):
+            if tgt_date_12m is not None and tgt_date_1m is not None:
                 p_1m = get_close_price(price_dict, all_trading_dates, date_to_idx, tgt_date_1m, max_date=tgt_date_1m)
                 p_12m = get_close_price(price_dict, all_trading_dates, date_to_idx, tgt_date_12m, max_date=tgt_date_12m)
                 mom_12_1 = (p_1m / p_12m - 1.0) if (p_1m and p_12m and p_12m > 0) else None
             else:
                 mom_12_1 = None
 
+            # PER 視窗：若跨過 confirmed 事件日，記 NA 並統計
             dt_3y_start = get_3y_start_date(sig_date)
-            if check_corp_action_in_per_window(corp_actions_for_stock, dt_3y_start, sig_date):
+            conf_evs = confirmed_events_map.get(sid, set())
+            has_conf_in_per = any(dt_3y_start <= ev_d <= sig_date for ev_d in conf_evs)
+            if has_conf_in_per:
                 per_res = None
+                excluded_per_event_stock_months += 1
             else:
                 per_rows = per_by_stock.get(sid, [])
                 per_res = compute_per_position(per_rows, sig_date)
@@ -695,6 +748,16 @@ def run_backtest(
                 "ret_6m": fwd_rets["6m"],
                 "ret_12m": fwd_rets["12m"],
                 "dividend_yield_at_signal": div_yield_at_sig,
+                "entry_status": stock_fwd.get("entry_status", "unfilled"),
+                "exit_status_3m": stock_fwd.get("exit_status_3m", "unresolved"),
+                "exit_status_6m": stock_fwd.get("exit_status_6m", "unresolved"),
+                "exit_status_12m": stock_fwd.get("exit_status_12m", "unresolved"),
+                "valuation_status_3m": stock_fwd.get("valuation_status_3m", "unresolved"),
+                "valuation_status_6m": stock_fwd.get("valuation_status_6m", "unresolved"),
+                "valuation_status_12m": stock_fwd.get("valuation_status_12m", "unresolved"),
+                "ret_3m_cons": stock_fwd.get("ret_3m_cons"),
+                "ret_6m_cons": stock_fwd.get("ret_6m_cons"),
+                "ret_12m_cons": stock_fwd.get("ret_12m_cons"),
                 "ret_3m_tr": fwd_rets_tr["3m"],
                 "ret_6m_tr": fwd_rets_tr["6m"],
                 "ret_12m_tr": fwd_rets_tr["12m"],
@@ -743,15 +806,18 @@ def run_backtest(
 
             ranks_3m = compute_percentile_rank([s["rel_mom_3m"] for s in month_stocks])
             ranks_12_1 = compute_percentile_rank([s["mom_12_1"] for s in month_stocks])
-            for s, rk, rk12 in zip(month_stocks, ranks_3m, ranks_12_1):
+            ranks_12_1_rel = compute_percentile_rank([s.get("rel_mom_12_1") for s in month_stocks])
+            for s, rk, rk12, rk12_rel in zip(month_stocks, ranks_3m, ranks_12_1, ranks_12_1_rel):
                 s["rel_mom_rank"] = rk
                 s["mom_12_1_rank"] = rk12
+                s["rel_mom_12_1_rank"] = rk12_rel
 
             for s in month_stocks:
                 r_m3 = s["rel_mom_3m"]
                 r_m1 = s["rel_mom_1m"]
                 rk = s["rel_mom_rank"]
                 rk12 = s.get("mom_12_1_rank")
+                rk12_rel = s.get("rel_mom_12_1_rank")
                 pos = s["position"]
 
                 is_m1 = bool(s["is_l1"] and r_m3 is not None and r_m3 > 0)
@@ -761,6 +827,7 @@ def run_backtest(
                 is_c1_per = bool(is_c1 and pos is not None)
                 is_c2 = bool(is_c1 and pos is not None and pos < 0)
                 is_mom_12_1 = bool(rk12 is not None and rk12 >= 0.75)
+                is_c1_12_1 = bool(rk12_rel is not None and rk12_rel >= 0.75)
 
                 s["is_m1"] = is_m1
                 s["is_m2"] = is_m2
@@ -769,6 +836,7 @@ def run_backtest(
                 s["is_c1_per"] = is_c1_per
                 s["is_c2"] = is_c2
                 s["is_mom_12_1"] = is_mom_12_1
+                s["is_c1_12_1"] = is_c1_12_1
 
                 s["M1"] = is_m1
                 s["M2"] = is_m2
@@ -777,6 +845,7 @@ def run_backtest(
                 s["C1_PER"] = is_c1_per
                 s["C2"] = is_c2
                 s["MOM_12_1"] = is_mom_12_1
+                s["C1_12_1"] = is_c1_12_1
 
                 d_tiers = compute_d_tiers(s, rank_threshold=0.75)
                 s.update(d_tiers)
@@ -801,15 +870,20 @@ def run_backtest(
     signals_cols = [
         "signal_date", "stock_id", "sub", "level", "is_l0", "is_l1", "is_l2", "position", "eps_cv", "rev_yoy_3m",
         "dividend_yield_at_signal",
+        "entry_status",
+        "exit_status_3m", "exit_status_6m", "exit_status_12m",
+        "valuation_status_3m", "valuation_status_6m", "valuation_status_12m",
         "ret_3m", "ret_6m", "ret_12m",
+        "ret_3m_cons", "ret_6m_cons", "ret_12m_cons",
         "ret_3m_tr", "ret_6m_tr", "ret_12m_tr",
         "ret_3m_net", "ret_6m_net", "ret_12m_net",
         "bench_3m", "bench_6m", "bench_12m",
         "sub_bench_3m", "sub_bench_6m", "sub_bench_12m",
         "exit_reason_3m", "exit_reason_6m", "exit_reason_12m",
         "ret_3m_old", "ret_6m_old", "ret_12m_old",
-        "mom_3m", "mom_1m", "mom_12_1", "rel_mom_3m", "rel_mom_1m", "rel_mom_rank",
-        "M1", "M2", "M3", "C1", "C1_PER", "C2", "MOM_12_1",
+        "mom_3m", "mom_1m", "mom_12_1", "rel_mom_3m", "rel_mom_1m", "rel_mom_12_1",
+        "rel_mom_rank", "mom_12_1_rank", "rel_mom_12_1_rank",
+        "M1", "M2", "M3", "C1", "C1_PER", "C2", "MOM_12_1", "C1_12_1",
         "D0", "D1", "D2", "D3", "D4", "D5",
     ]
     signals_out = signals_df[signals_cols].copy()
@@ -825,6 +899,9 @@ def run_backtest(
         date_to_idx=date_to_idx,
         div_yield_dict=div_yield_dict,
         out_dir=out_dir,
+        price_rows_by_stock=price_rows_by_stock,
+        corp_actions_map={},
+        strats=("D0", "D3", "bench"),
     )
     equity_curve_path = out_dir / "equity_curve.csv"
 
@@ -835,6 +912,9 @@ def run_backtest(
         month_signals=month_signals,
         eval_stock_counts=eval_stock_counts_per_month,
         portfolio_metrics=portfolio_metrics,
+        cand_res=cand_res,
+        universe_diff_info=universe_diff_info,
+        excluded_per_event_stock_months=excluded_per_event_stock_months,
     )
     with open(summary_md_path, "w", encoding="utf-8") as f:
         f.write(summary_content)
@@ -850,6 +930,8 @@ def run_backtest(
         "total_signals_m2": int(df_eval["is_m2"].sum()),
         "total_signals_m3": int(df_eval["is_m3"].sum()),
         "total_signals_c1": int(df_eval["is_c1"].sum()),
+        "total_signals_c1_12_1": int(df_eval["is_c1_12_1"].sum()),
+        "total_signals_mom_12_1": int(df_eval["is_mom_12_1"].sum()),
         "total_signals_c2": int(df_eval["is_c2"].sum()),
         "total_signals_d0": int(df_eval["is_d0"].sum()),
         "total_signals_d1": int(df_eval["is_d1"].sum()),
@@ -965,12 +1047,145 @@ def format_stat_table(stats: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def compute_bootstrap_ci_table(
+    df_eval: pd.DataFrame,
+    month_signals: list[str],
+    pairs: list[tuple[str, str, str]],
+    horizon: str = "6m",
+    block_sizes: tuple[int, ...] = (3, 6),
+    n_resamples: int = 2000,
+    seed: int = 42,
+) -> str:
+    """計算父子配對差與時間區塊 Bootstrap 檢定表格。"""
+    ret_col = f"ret_{horizon}"
+    b_col = f"bench_{horizon}"
+    lines = [
+        f"#### {horizon} 持有期父子配對差與區塊 Bootstrap 檢定",
+        "",
+        f"| 父策略 $\\rightarrow$ 子策略 | 配對意義 | 共同月份數 | 平均配對差 | 中位配對差 | 勝率 (子>父) | {block_sizes[0]}m 區塊 95% CI | {block_sizes[1]}m 區塊 95% CI |",
+        "| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
+    ]
+
+    for p_col, c_col, label in pairs:
+        p_rets = []
+        c_rets = []
+        for s_date, grp in df_eval.groupby("signal_date"):
+            if s_date not in month_signals:
+                continue
+            if p_col == "bench":
+                valid_b = grp[grp[b_col].notna()]
+                p_val = valid_b[b_col].iloc[0] if len(valid_b) > 0 else None
+            else:
+                p_sub = grp[grp[p_col] & grp[ret_col].notna()]
+                p_val = float(p_sub[ret_col].mean()) if len(p_sub) > 0 else None
+
+            if c_col == "bench":
+                valid_b = grp[grp[b_col].notna()]
+                c_val = valid_b[b_col].iloc[0] if len(valid_b) > 0 else None
+            else:
+                c_sub = grp[grp[c_col] & grp[ret_col].notna()]
+                c_val = float(c_sub[ret_col].mean()) if len(c_sub) > 0 else None
+
+            if p_val is not None and c_val is not None:
+                p_rets.append(p_val)
+                c_rets.append(c_val)
+
+        n = len(p_rets)
+        if n == 0:
+            lines.append(f"| **{p_col} $\\rightarrow$ {c_col}** | {label} | 0 | N/A | N/A | N/A | N/A | N/A |")
+            continue
+
+        diffs = np.array(c_rets) - np.array(p_rets)
+        mean_d = float(np.mean(diffs))
+        med_d = float(np.median(diffs))
+        win_r = float(np.mean(diffs > 0))
+
+        boot_b1 = block_bootstrap_paired_diff(c_rets, p_rets, block_size=block_sizes[0], n_resamples=n_resamples, seed=seed)
+        boot_b2 = block_bootstrap_paired_diff(c_rets, p_rets, block_size=block_sizes[1], n_resamples=n_resamples, seed=seed)
+
+        ci1_str = f"[{boot_b1['ci_95_lower']*100:+.2f}%, {boot_b1['ci_95_upper']*100:+.2f}%] ({boot_b1['n_blocks']} 區塊)"
+        ci2_str = f"[{boot_b2['ci_95_lower']*100:+.2f}%, {boot_b2['ci_95_upper']*100:+.2f}%] ({boot_b2['n_blocks']} 區塊)"
+
+        lines.append(
+            f"| **{p_col} $\\rightarrow$ {c_col}** | {label} | {n} | **{mean_d*100:+.2f}%** | {med_d*100:+.2f}% | {win_r*100:.1f}% | {ci1_str} | {ci2_str} |"
+        )
+
+    lines.extend([
+        "",
+        f"> **產生函式**：`backtest_validity.block_bootstrap_paired_diff(series_child, series_parent, block_size={block_sizes}, n_resamples={n_resamples}, seed={seed})`",
+        "> **共同期間規則**：每組父子配對只取該父子兩策略都有選股訊號的月份（非全策略交集）。",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def compute_full_capital_timeline_table(
+    df_eval: pd.DataFrame,
+    month_signals: list[str],
+    strat_cols: list[tuple[str, str]],
+    horizon: str = "6m",
+) -> str:
+    """計算各策略完整資金時間軸統計（空手月份＝現金 0%）。"""
+    ret_col = f"ret_{horizon}"
+    b_col = f"bench_{horizon}"
+    lines = [
+        f"#### {horizon} 持有期完整資金時間軸（含空手月＝現金 0%）",
+        "",
+        "| 策略代號 | 策略名稱 | 總月份數 | 有選股月份 (Active) | 空手月份 (Cash 0%) | 平均月報酬 | 月報酬標準差 | 年化報酬 (CAGR) | 年化波動度 | Sharpe 比率 (Rf=0) |",
+        "| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
+    ]
+
+    valid_sig_dates = [d for d in month_signals if (df_eval["signal_date"] == d).any() and df_eval[df_eval["signal_date"] == d][ret_col].notna().any()]
+    tot_m = len(valid_sig_dates)
+
+    for col, label in strat_cols:
+        monthly_series = []
+        active_cnt = 0
+        for s_date in valid_sig_dates:
+            grp = df_eval[df_eval["signal_date"] == s_date]
+            if col == "bench":
+                valid = grp[grp[b_col].notna()]
+                val = valid[b_col].iloc[0] if len(valid) > 0 else 0.0
+                active_cnt += 1
+            else:
+                valid = grp[grp[col] & grp[ret_col].notna()]
+                if len(valid) > 0:
+                    val = float(valid[ret_col].mean())
+                    active_cnt += 1
+                else:
+                    val = 0.0
+            monthly_series.append(val)
+
+        arr = np.array(monthly_series)
+        m_mean = float(np.mean(arr)) if len(arr) > 0 else 0.0
+        m_std = float(np.std(arr, ddof=1)) if len(arr) > 1 else 0.0
+        ann_vol = float(m_std * np.sqrt(12.0))
+        eq = float(np.prod(1.0 + arr))
+        cagr = float(eq ** (12.0 / tot_m) - 1.0) if tot_m > 0 and eq > 0 else -1.0
+        sharpe = float((m_mean * 12.0) / ann_vol) if ann_vol > 0 else 0.0
+
+        cash_cnt = tot_m - active_cnt
+        lines.append(
+            f"| **{col}** | {label} | {tot_m} | {active_cnt} | {cash_cnt} | {m_mean*100:+.2f}% | {m_std*100:.2f}% | {cagr*100:+.2f}% | {ann_vol*100:.2f}% | {sharpe:.2f} |"
+        )
+
+    lines.extend([
+        "",
+        "> **資金時間軸說明**：本表涵蓋全歷史完整月份，若該策略當月無通過篩選之標的，該月份以「現金 0%」計入報酬序列（不排除空手月份），真實反映投資人固定部署該策略之長期資金績效。",
+        "",
+    ])
+    return "\n".join(lines)
+
+
 def generate_summary_markdown(
     df_eval: pd.DataFrame,
     earliest_dates: dict,
     month_signals: list[str],
     eval_stock_counts: list[int],
     portfolio_metrics: dict | None = None,
+    cand_res: dict | None = None,
+    universe_diff_info: dict | None = None,
+    excluded_per_event_stock_months: int = 0,
 ) -> tuple[str, dict]:
     """產出完整 backtest/summary.md 內容。"""
     n_sig_months = len(month_signals)
@@ -1370,7 +1585,106 @@ def generate_summary_markdown(
         "     - 在 2026-06-30 至 2026-07-31 期間，Universe 股票出現全市場性的系統性崩跌。在當期全體 235 檔可評估標的中，有高達 **93.2% 的股票單月報酬為負**。",
         "     - Universe 股票單月平均跌幅達 **-20.88%**（中位數跌幅 -21.46%，跌幅最慘重之後 10% 分位達 -37.47%，最差單檔重挫 -61.42%）。",
         "     - Universe 基準單月重跌 **-21.42%**；而動能組因前期漲幅大、持股集中，隨全市場出現劇烈獲利了結拋售，D0 單月下跌 **-26.84%**，D3 單月下跌 **-25.99%**，單月跌幅創全歷史回測最高紀錄，導致策略淨值自前期高點急遽拉回，形成最大回撤點。",
+        "",
+        "## 9. 配對推論與時間區塊 Bootstrap 檢定（Paired Inference & Block Bootstrap）",
+        "",
+        "> **推論方法與嚴格紀律**：",
+        "> 1. **每組父子策略僅取兩者皆有選股訊號的共同月份（Non-empty Common Months）**進行配對差檢定（$d_t = R_{\\text{child}, t} - R_{\\text{parent}, t}$），絕不以全策略交集人為縮減樣本；",
+        "> 2. **所有策略共用完全相同的隨機重抽時間索引**（RandomState seed=42），保存股票橫斷面之共同衝擊；",
+        "> 3. 3 個月與 6 個月區塊長度分別輸出信賴區間與有效區塊數；12 個月持有期嚴格限制使用 6 個月以上區塊長度；",
+        "> 4. 每張表格下方明確揭露產生程式、函式簽名與參數設定，保證研究完全可重現。",
+        "",
     ])
+
+    pairs_bootstrap = [
+        ("D0", "D1", "排除分割"),
+        ("D1", "D2", "排除背離"),
+        ("D0", "D2", "排除分割與背離"),
+        ("D2", "D3", "8 季 EPS 品質排雷"),
+        ("D3", "D4", "排除極端高估值 (PER位置 > 2.0)"),
+        ("D3", "D5", "營收年增 > 0"),
+        ("is_l0", "is_l1", "低估值加品質排雷"),
+        ("is_l1", "is_l2", "低估高品質加營收確認"),
+        ("is_c1", "is_c2", "相對動能加低估值"),
+        ("bench", "is_mom_12_1", "全池原始 12-1 動能 vs Universe 基準"),
+        ("is_c1", "is_mom_12_1", "全池原始 12-1 vs 次產業相對 3m"),
+        ("is_c1", "is_c1_12_1", "次產業相對 12-1 vs 次產業相對 3m (Lookback 效應)"),
+        ("is_c1_12_1", "is_mom_12_1", "全池原始 12-1 vs 次產業相對 12-1 (選股池/相對效應)"),
+    ]
+
+    table_ci_6m = compute_bootstrap_ci_table(df_eval, month_signals, pairs_bootstrap, horizon="6m", block_sizes=(3, 6))
+    table_ci_3m = compute_bootstrap_ci_table(df_eval, month_signals, pairs_bootstrap, horizon="3m", block_sizes=(3, 6))
+    table_ci_12m = compute_bootstrap_ci_table(df_eval, month_signals, pairs_bootstrap, horizon="12m", block_sizes=(6, 12))
+
+    md_lines.extend([
+        table_ci_6m,
+        "",
+        table_ci_3m,
+        "",
+        table_ci_12m,
+        "",
+        "## 10. 完整資金時間軸分析（含空手月＝現金 0%）",
+        "",
+    ])
+
+    strat_cols_timeline = [
+        ("bench", "Universe 基準等權"),
+        ("is_mom_12_1", "MOM_12_1 (全池原始 12-1 動能)"),
+        ("is_c1_12_1", "C1_12_1 (次產業相對 12-1 動能)"),
+        ("is_c1", "C1 (次產業相對 3m 動能)"),
+        ("is_c2", "C2 (C1 且低估值)"),
+        ("is_d0", "D0 (純相對動能前 25%)"),
+        ("is_d1", "D1 (D0 且非分割)"),
+        ("is_d2", "D2 (D1 且非背離)"),
+        ("is_d3", "D3 (D2 且 8 季 EPS 品質過關)"),
+        ("is_d4", "D4 (D3 且 PER 位置 <= 2.0)"),
+        ("is_d5", "D5 (D3 且營收年增 > 0)"),
+        ("is_l0", "L0 (純低估值)"),
+        ("is_l1", "L1 (L0 且品質過關)"),
+        ("is_l2", "L2 (L1 且營收確認)"),
+    ]
+    table_timeline_6m = compute_full_capital_timeline_table(df_eval, month_signals, strat_cols_timeline, horizon="6m")
+    md_lines.append(table_timeline_6m)
+
+    if cand_res:
+        md_lines.extend([
+            "",
+            "## 11. 公司行動候選與獨立事件查核統計",
+            "",
+            f"- **價格跳動偵測候選總數**：{cand_res['total_candidates']} 筆",
+            f"- **在 `fm_corporate_events` 確認之事件數 (`confirmed`)**：**{cand_res['confirmed_count']} 筆**（日期 ±3 交易日吻合）",
+            f"- **未確認價格跳動數 (`unresolved`)**：**{cand_res['unresolved_count']} 筆**（一律視為真實報酬，不做任何價格調整）",
+            f"- **第一輪 38 筆減資候選對照**：",
+            f"  - 被事件表確認：**{cand_res['r1_38_reduction_confirmed']} 筆**",
+            f"  - 被事件表否決（未找到事件）：**{cand_res['r1_38_reduction_vetoed']} 筆**（證實第一輪多數減資候選為真實市場急拉，非公司減資）",
+            f"- **跨 confirmed 事件導致 PER 3 年視窗排除之股票月數**：**{excluded_per_event_stock_months} 股票月**",
+            "",
+            "### 前 20 筆未確認價格跳動 (`unresolved`) 清單",
+            "",
+            "| 股票代號 | 日期 | 前收盤 | 當日收盤 | 跳動倍率 | 候選原因 |",
+            "| :---: | :---: | :---: | :---: | :---: | :--- |",
+        ])
+        for r in cand_res.get("top20_unresolved", []):
+            ratio = r['close'] / r['prev_close'] if r['prev_close'] > 0 else 0.0
+            md_lines.append(f"| {r['stock_id']} | {r['date']} | {r['prev_close']:.2f} | {r['close']:.2f} | {ratio:.2f}x | {r['reason']} |")
+        md_lines.append("")
+
+    if universe_diff_info:
+        md_lines.extend([
+            "",
+            "## 12. 母體範圍與存活者偏誤正名",
+            "",
+            "> **回測正式命名**：**「2026 存活成分股回顧回測（Conditional on 2026 Survivors）」**。",
+            "",
+            f"- **母體候選池（半導體鏈與 AI 供應鏈聯集）**：{universe_diff_info['mother_union_count']} 檔",
+            f"- **2026 存活成分股清單 (`universe_2026_survivors.csv`)**：{universe_diff_info['survivors_count']} 檔",
+            f"- **差集分析**：",
+            f"  - 在聯集中但未列於 237 檔存活名單（主要因無報價或交易歷史不足 250 日）：{len(universe_diff_info['in_union_not_surv'])} 檔",
+            f"  - 在 237 檔存活名單但未在半導體/AI清單（屬於延伸成分股）：{len(universe_diff_info['in_surv_not_union'])} 檔（{', '.join(universe_diff_info['in_surv_not_union'])}）",
+            "",
+        ])
+
+    stats_c1_12_1 = calculate_tier_performance(df_eval, "is_c1_12_1")
 
     summary_text = "\n".join(md_lines) + "\n"
     tier_stats = {
@@ -1381,7 +1695,10 @@ def generate_summary_markdown(
         "M2": stats_m2,
         "M3": stats_m3,
         "C1": stats_c1,
+        "C1_PER": stats_c1_per,
         "C2": stats_c2,
+        "C1_12_1": stats_c1_12_1,
+        "MOM_12_1": stats_mom_12_1,
         "D0": stats_d_price["D0"],
         "D1": stats_d_price["D1"],
         "D2": stats_d_price["D2"],
