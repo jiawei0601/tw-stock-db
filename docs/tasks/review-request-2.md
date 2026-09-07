@@ -2,6 +2,12 @@
 
 你是獨立審查方，以乾淨 session 啟動，只看 repo。全程繁體中文。**不要修改任何檔案、不要網路請求、不要 commit**；可讀檔、可跑 `python backtest/concentration_mc.py --n 5` 與 `--n 10`、可跑 pytest。
 
+## 讀取預算（重要：前兩次審查都因讀太多而在寫報告前撞額度）
+- **禁止讀任何 `.csv`**（`backtest/signals.csv` 2.4 MB、`t1_signals.csv`、`entry_timing_detail.csv`）；要看數字只准跑上面列的腳本看 stdout，或讀 `.md` 摘要。
+- `HANDOFF.md` 已瘦身為現況摘要；歷史在 `docs/handoff-archive.md`，**不要讀歸檔檔**。
+- `backtest_valuation.py` 只讀這些函式：`compute_d_tiers`、`generate_portfolio_equity_curve`、`get_close_price`、`run_backtest` 的 D 層與前瞻報酬段；`backtest_t1.py` 不用讀（本輪不審 T1）。
+- 先寫報告骨架與總判定，再逐項補；每完成一項就存檔一次，額度不足時至少留下已完成的部分。
+
 ## 背景
 你（或同儕）先前的審查在 `docs/tasks/reports/codex-design-review.md`，總判定「需修正後可信」。之後我們：
 1. 依該審查開了修復工單 `docs/tasks/backtest-validity-repair.md`（尚未執行）。
