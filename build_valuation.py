@@ -48,6 +48,9 @@ FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 PER_START = "2023-09-01"
 FIN_START = "2024-01-01"
 FETCH_SLEEP_SECONDS = 0.6
+BACKFILL_SLEEP_SECONDS = 0.5
+BACKFILL_DEFAULT_START = "2021-01-01"
+BACKFILL_REVENUE_START = "2020-01-01"  # 月營收要多抓一年才能算 2021 年的 YoY
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS per_daily (
@@ -74,6 +77,17 @@ CREATE TABLE IF NOT EXISTS fm_price_daily (
     date      TEXT NOT NULL,
     close     REAL,
     PRIMARY KEY (stock_id, date)
+);
+
+-- 【2026-09-07 backfill】專存 FinMind TaiwanStockMonthRevenue 的估值用月營收表，
+-- 不動既有 monthly_revenue（來源/欄位/PK 不同，那張表是 build_revenue_history.py
+-- 的 MOPS 全市場歷史表）。回測用途，只服務 --backfill / --backfill-status。
+CREATE TABLE IF NOT EXISTS fm_revenue_monthly (
+    stock_id           TEXT NOT NULL,
+    ym                 TEXT NOT NULL,   -- 'YYYY-MM'
+    revenue            INTEGER,
+    revenue_last_year  INTEGER,
+    PRIMARY KEY (stock_id, ym)
 );
 
 CREATE TABLE IF NOT EXISTS valuation_fetch_log (
@@ -384,11 +398,14 @@ def _finmind_token() -> str:
     return ""
 
 
-def _fetch_finmind(session, dataset: str, sid: str, start_date: str, token: str) -> tuple[list, int | None]:
+def _fetch_finmind(
+    session, dataset: str, sid: str, start_date: str, token: str, end_date: str | None = None
+) -> tuple[list, int | None]:
     """回傳 (data, http_status_flag)；http_status_flag 只在 402/403 時回傳該碼，其餘回 None。"""
-    resp = session.get(FINMIND_URL, params={
-        "dataset": dataset, "data_id": sid, "start_date": start_date, "token": token,
-    }, timeout=30)
+    params = {"dataset": dataset, "data_id": sid, "start_date": start_date, "token": token}
+    if end_date:
+        params["end_date"] = end_date
+    resp = session.get(FINMIND_URL, params=params, timeout=30)
     if resp.status_code in (402, 403):
         return [], resp.status_code
     payload = resp.json()
@@ -467,6 +484,210 @@ def fetch_missing(conn: sqlite3.Connection, universe: dict[str, tuple[str, str]]
             time.sleep(FETCH_SLEEP_SECONDS)
 
     return {"fetched": fetched, "skipped": skipped, "stopped_reason": stopped_reason}
+
+
+# ---------------------------------------------------------------------------
+# --backfill（把四個 dataset 的歷史回填到目標日，供回測使用）
+# ---------------------------------------------------------------------------
+
+# (dataset, 表名, 日期欄位, granularity)。granularity 'day' 用 YYYY-MM-DD 逐日回推，
+# 'month' 用 YYYY-MM 逐月回推（月營收）。
+BACKFILL_DATASETS = (
+    ("TaiwanStockPER", "per_daily", "date", "day"),
+    ("TaiwanStockPrice", "fm_price_daily", "date", "day"),
+    ("TaiwanStockFinancialStatements", "eps_quarterly", "quarter_end", "day"),
+    ("TaiwanStockMonthRevenue", "fm_revenue_monthly", "ym", "month"),
+)
+
+
+def _day_before(date_str: str, granularity: str) -> str:
+    """回推一天（'day'，YYYY-MM-DD）或一個月（'month'，YYYY-MM），字串輸出保持同格式。"""
+    from datetime import timedelta
+
+    if granularity == "day":
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        return (d - timedelta(days=1)).strftime("%Y-%m-%d")
+    # month
+    y, m = (int(x) for x in date_str.split("-"))
+    if m == 1:
+        y -= 1
+        m = 12
+    else:
+        m -= 1
+    return f"{y:04d}-{m:02d}"
+
+
+def _revenue_target_date(target_date: str) -> str:
+    """月營收目標日比其他 dataset 早一年（算 YoY 需要），例如目標 2021-01-01 -> 2020-01-01。"""
+    y, rest = target_date.split("-", 1)
+    return f"{int(y) - 1}-{rest}"
+
+
+def _earliest_date(conn: sqlite3.Connection, table: str, date_col: str, sid: str) -> str | None:
+    row = conn.execute(
+        f"SELECT MIN({date_col}) FROM {table} WHERE stock_id = ?", (sid,)
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def _gap_for(existing_earliest: str | None, target_date: str, granularity: str) -> tuple[str, str] | None:
+    """回傳需要補抓的 (gap_start, gap_end)（含端點），已足夠涵蓋目標日則回 None。
+    沒有任何既有資料時，gap 是 [目標日, 今天]（整段從頭抓）。"""
+    if existing_earliest is not None and existing_earliest <= target_date:
+        return None
+    if existing_earliest is None:
+        gap_end = datetime.now(timezone.utc).strftime("%Y-%m-%d" if granularity == "day" else "%Y-%m")
+    else:
+        gap_end = _day_before(existing_earliest, granularity)
+    if gap_end < target_date:
+        return None
+    return (target_date, gap_end)
+
+
+def _write_backfill_batch(conn: sqlite3.Connection, dataset: str, sid: str, data: list) -> int:
+    if dataset == "TaiwanStockPER":
+        batch = [(sid, d["date"], d.get("PER"), d.get("PBR"), d.get("dividend_yield"))
+                 for d in data if d.get("date")]
+        conn.executemany(
+            "INSERT OR REPLACE INTO per_daily (stock_id, date, per, pbr, dividend_yield) "
+            "VALUES (?, ?, ?, ?, ?)", batch)
+        return len(batch)
+    if dataset == "TaiwanStockFinancialStatements":
+        batch = [(sid, d["date"], d.get("value")) for d in data if d.get("type") == "EPS" and d.get("date")]
+        conn.executemany(
+            "INSERT OR REPLACE INTO eps_quarterly (stock_id, quarter_end, eps) VALUES (?, ?, ?)", batch)
+        return len(batch)
+    if dataset == "TaiwanStockPrice":
+        batch = [(sid, d["date"], d.get("close"))
+                 for d in data if d.get("date") and d.get("close") is not None and d["close"] > 0]
+        conn.executemany(
+            "INSERT OR REPLACE INTO fm_price_daily (stock_id, date, close) VALUES (?, ?, ?)", batch)
+        return len(batch)
+    if dataset == "TaiwanStockMonthRevenue":
+        batch = []
+        for d in data:
+            year = d.get("revenue_year")
+            month = d.get("revenue_month")
+            if year is None or month is None:
+                continue
+            ym = f"{int(year):04d}-{int(month):02d}"
+            batch.append((sid, ym, d.get("revenue"), d.get("revenue_last_year")))
+        conn.executemany(
+            "INSERT OR REPLACE INTO fm_revenue_monthly (stock_id, ym, revenue, revenue_last_year) "
+            "VALUES (?, ?, ?, ?)", batch)
+        return len(batch)
+    return 0
+
+
+def backfill_missing(
+    conn: sqlite3.Connection, universe: dict[str, tuple], target_date: str = BACKFILL_DEFAULT_START
+) -> dict:
+    """對 universe 每檔、每個 dataset 只補抓 [target_date, 現有最早日) 這段 gap（已涵蓋
+    目標日的直接跳過），遇 402/403 立刻停止並記錄，回傳目前進度供呼叫端印出 /
+    決定 exit code。每檔每個 dataset 完成即 conn.commit()，可隨時中斷續跑。"""
+    import requests
+
+    token = _finmind_token()
+    session = requests.Session()
+
+    revenue_target = _revenue_target_date(target_date)
+    target_by_dataset = {
+        "TaiwanStockPER": target_date,
+        "TaiwanStockPrice": target_date,
+        "TaiwanStockFinancialStatements": target_date,
+        "TaiwanStockMonthRevenue": revenue_target,
+    }
+
+    fetched = 0
+    skipped = 0
+    stopped_reason = None
+
+    sids = sorted(universe.keys())
+    for sid in sids:
+        if stopped_reason:
+            break
+        for dataset, table, date_col, granularity in BACKFILL_DATASETS:
+            if stopped_reason:
+                break
+            tgt = target_by_dataset[dataset]
+            earliest = _earliest_date(conn, table, date_col, sid)
+            gap = _gap_for(earliest, tgt, granularity)
+            if gap is None:
+                skipped += 1
+                continue
+            gap_start, gap_end = gap
+            now = _now_iso()
+            data, err_status = _fetch_finmind(session, dataset, sid, gap_start, token, end_date=gap_end)
+            if err_status is not None:
+                status = f"error_{err_status}"
+                conn.execute(
+                    "INSERT OR REPLACE INTO valuation_fetch_log (stock_id, dataset, fetched_at, status, rows) "
+                    "VALUES (?, ?, ?, ?, 0)",
+                    (sid, dataset, now, status),
+                )
+                conn.commit()
+                stopped_reason = status
+                break
+            status = "fetched" if data else "empty"
+            rows_written = _write_backfill_batch(conn, dataset, sid, data)
+            conn.execute(
+                "INSERT OR REPLACE INTO valuation_fetch_log (stock_id, dataset, fetched_at, status, rows) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (sid, dataset, now, status, rows_written),
+            )
+            conn.commit()
+            fetched += 1
+            time.sleep(BACKFILL_SLEEP_SECONDS)
+
+    # 計算 remaining：重新掃一次所有 (股票, dataset) 組合，還沒補到目標日的數量。
+    remaining = 0
+    for sid in sids:
+        for dataset, table, date_col, granularity in BACKFILL_DATASETS:
+            tgt = target_by_dataset[dataset]
+            earliest = _earliest_date(conn, table, date_col, sid)
+            if earliest is None or earliest > tgt:
+                remaining += 1
+
+    return {
+        "fetched": fetched, "skipped": skipped, "stopped_reason": stopped_reason,
+        "remaining": remaining,
+    }
+
+
+def backfill_status(
+    conn: sqlite3.Connection, universe: dict[str, tuple], target_date: str = BACKFILL_DEFAULT_START
+) -> dict:
+    """純查詢：每個表的股票數、最早日期已 <= 目標日的股票數、還缺的數量。不打網路請求。"""
+    revenue_target = _revenue_target_date(target_date)
+    target_by_dataset = {
+        "TaiwanStockPER": target_date,
+        "TaiwanStockPrice": target_date,
+        "TaiwanStockFinancialStatements": target_date,
+        "TaiwanStockMonthRevenue": revenue_target,
+    }
+    sids = sorted(universe.keys())
+    result = {}
+    total_remaining = 0
+    for dataset, table, date_col, granularity in BACKFILL_DATASETS:
+        tgt = target_by_dataset[dataset]
+        have = 0
+        done = 0
+        missing = 0
+        for sid in sids:
+            earliest = _earliest_date(conn, table, date_col, sid)
+            if earliest is not None:
+                have += 1
+                if earliest <= tgt:
+                    done += 1
+                    continue
+            missing += 1
+        total_remaining += missing
+        result[table] = {
+            "target_date": tgt, "universe_size": len(sids),
+            "have_any_data": have, "done_to_target": done, "missing": missing,
+        }
+    result["_total_remaining"] = total_remaining
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -790,6 +1011,12 @@ def main() -> None:
                          help="可重複指定，依序匯入多份舊腳本留下的 JSON cache")
     parser.add_argument("--fetch", action="store_true", help="對缺資料的股票打 FinMind API 補抓")
     parser.add_argument("--screen", action="store_true", help="本地運算篩選並寫入 valuation_screen")
+    parser.add_argument("--backfill", nargs="?", const=BACKFILL_DEFAULT_START, default=None,
+                         metavar="YYYY-MM-DD",
+                         help=f"回填四個 dataset 的歷史到指定日期（預設 {BACKFILL_DEFAULT_START}），"
+                              "供回測使用；遇 402/403 exit code 3，可重跑續傳")
+    parser.add_argument("--backfill-status", action="store_true",
+                         help="只印回填進度（每表股票數/已達目標日數/還缺數），不打網路請求")
     args = parser.parse_args()
 
     conn = get_conn(args.db_path)
@@ -809,6 +1036,31 @@ def main() -> None:
             if result["stopped_reason"]:
                 print(f"因 {result['stopped_reason']} 提前停止，下次重跑會從中斷處續抓")
 
+        exit_code = 0
+
+        if args.backfill is not None:
+            universe = {**ai_chain_universe(), **semiconductor_universe(conn)}
+            print(f"開始回填至 {args.backfill}，universe 共 {len(universe)} 檔")
+            result = backfill_missing(conn, universe, args.backfill)
+            print(f"本次新抓 {result['fetched']} 個 (股票,dataset)，跳過已達標 {result['skipped']} 個")
+            if result["stopped_reason"]:
+                print(f"因 {result['stopped_reason']} 提前停止，下次重跑會從中斷處續抓")
+                print(f"BACKFILL status=quota remaining={result['remaining']}")
+                exit_code = 3
+            else:
+                print(f"BACKFILL status=done remaining={result['remaining']}")
+
+        if args.backfill_status:
+            universe = {**ai_chain_universe(), **semiconductor_universe(conn)}
+            status = backfill_status(conn, universe, args.backfill or BACKFILL_DEFAULT_START)
+            for table, s in status.items():
+                if table == "_total_remaining":
+                    continue
+                print(f"{table}: target={s['target_date']} universe={s['universe_size']} "
+                      f"has_data={s['have_any_data']} done_to_target={s['done_to_target']} "
+                      f"missing={s['missing']}")
+            print(f"總計還缺 {status['_total_remaining']} 個 (股票,dataset)")
+
         if args.screen:
             result = screen(conn)
             print(f"valuation_screen 寫入完成：run_date={result['run_date']}，"
@@ -816,6 +1068,9 @@ def main() -> None:
             print(f"分類分布：{result['categories']}")
     finally:
         conn.close()
+
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

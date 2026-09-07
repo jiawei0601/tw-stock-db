@@ -268,3 +268,44 @@ def test_revenue_metrics_insufficient_months_is_none(tmp_path):
     assert result["rev_yoy_3m"] is None
     assert result["rev_eps_diverge"] == 0
     conn.close()
+
+
+def test_gap_for_partial_existing_data():
+    """現有最早 2023-09-01、目標 2021-01-01 -> 應抓 2021-01-01 到 2023-08-31。"""
+    gap = bv._gap_for("2023-09-01", "2021-01-01", "day")
+    assert gap == ("2021-01-01", "2023-08-31")
+
+
+def test_gap_for_already_covers_target():
+    assert bv._gap_for("2020-06-01", "2021-01-01", "day") is None
+
+
+def test_gap_for_no_existing_data():
+    gap = bv._gap_for(None, "2021-01-01", "day")
+    assert gap is not None
+    gap_start, gap_end = gap
+    assert gap_start == "2021-01-01"
+    assert gap_end >= "2021-01-01"
+
+
+def test_gap_for_month_granularity():
+    gap = bv._gap_for("2021-03", "2020-01", "month")
+    assert gap == ("2020-01", "2021-02")
+
+
+def test_revenue_target_date_one_year_earlier():
+    assert bv._revenue_target_date("2021-01-01") == "2020-01-01"
+
+
+def test_fm_revenue_monthly_table_exists(conn):
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    assert "fm_revenue_monthly" in tables
+
+
+def test_fm_revenue_monthly_no_duplicate_pk(conn):
+    total, distinct = conn.execute(
+        "SELECT COUNT(*), COUNT(DISTINCT stock_id || '|' || ym) FROM fm_revenue_monthly"
+    ).fetchone()
+    assert total == distinct
