@@ -19,3 +19,4 @@ data/*.log
 valuation_fetch.log
 fetch_done.flag
 backfill.log
+codex-backfill.log

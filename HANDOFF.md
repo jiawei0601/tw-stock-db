@@ -1215,3 +1215,5 @@
 - 2026-09-07 委員會 10 檔總結：`analysis/committee-summary-2026-09-07.md`。
 
 - 2026-09-07 委員會評估國巨 2327、上銀 2049（使用者指定），見 `analysis/committee-2327-2049-2026-09-07.md`。
+
+- 2026-09-07 回測框架 `backtest_valuation.py`（agy 實作、Claude 審查 approve，8 測試綠）：point-in-time 月頻回測，輸出 backtest/。首輪結果 L0/L1 在 2022–2026 相對等權 universe 為負超額（2024 例外），L2 待 fm_revenue_monthly 回填後重跑 `python backtest_valuation.py --out backtest/`。審查紀錄見 docs/tasks/reports/。
