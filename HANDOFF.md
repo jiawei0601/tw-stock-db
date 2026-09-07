@@ -142,3 +142,5 @@ GitHub Pages）。
 
 歷史輪次（第一輪～第十五輪，含進行中/下一步/關鍵決策/雷區/怎麼跑舊版，以及
 2026-09-07 當日原始逐條記錄）見 [`docs/handoff-archive.md`](docs/handoff-archive.md)。
+
+- 2026-09-07 21:30 第二輪審查（agy／Gemini，Codex 版 22:20 重跑中）判定「需改後執行」，五項必改已併入 `docs/tasks/backtest-validity-repair.md`（雙向公司行動、T+1 不可成交政策、母體改名 universe_2026_survivors 並加上市滿一年、3／6 月雙區塊 bootstrap、執行面測試統一 T+1 與再投資口徑）。**措辭修正**：D5 81% 與「訊號日買最好」皆為舊口徑探索性數字，受同日成交與缺席 2022 高估，待修復後重核；committee-summary 的「可分批建倉」已改為觀察標的措辭。審查原文 `docs/tasks/reports/agy-review-2.md`。
