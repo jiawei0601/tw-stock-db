@@ -1211,3 +1211,5 @@
 - 2026-09-07 委員會評估千附 8383 與力領科技 6996，見 `analysis/committee-8383-6996-2026-09-07.md`。
 
 - 2026-09-07 千附 8383、力領科技 6996 加入 stock_groups（group_type=watchlist），觸發條件見 `analysis/watchlist-valuation.md`；Q3 財報提醒排程 2026-11-16。
+
+- 2026-09-07 委員會 10 檔總結：`analysis/committee-summary-2026-09-07.md`。
