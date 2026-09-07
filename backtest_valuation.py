@@ -29,6 +29,22 @@ import statistics
 import numpy as np
 import pandas as pd
 
+from backtest_validity import (
+    filter_complete_month_signals,
+    get_next_trading_day,
+    resolve_execution_price,
+    compute_stock_forward_returns,
+    detect_corporate_actions_for_stock,
+    compute_holding_return_adjusted,
+    check_stock_eligibility,
+    check_continuous_eps,
+    check_continuous_revenue,
+    check_corp_action_in_window,
+    check_corp_action_in_per_window,
+    block_bootstrap_paired_diff,
+    compute_drifted_portfolio_equity_curve,
+)
+
 DEFAULT_DB_PATH = Path(__file__).parent / "data" / "tw_stocks.db"
 DEFAULT_OUT_DIR = Path(__file__).parent / "backtest"
 
@@ -152,28 +168,28 @@ def compute_eps_metrics(
     eps_rows_sorted: list[tuple[str, float, str]],
     signal_date: str,
 ) -> tuple[float | None, int | None, float | None, int]:
-    """計算 EPS 指標。
+    """計算 EPS 指標（Item D: 連續 8 季檢查，缺季或最新一季超過 200 天則回傳 NA）。
     eps_rows_sorted: 依 quarter_end 升冪排序之 (quarter_end, eps, visible_date) 清單。
     回傳 (eps_cv, loss_q, eps_ttm_growth, n_visible)。
     """
-    visible_eps = [e for q, e, v in eps_rows_sorted if v <= signal_date]
+    visible_eps = [e for e in eps_rows_sorted if e[2] <= signal_date]
     n_vis = len(visible_eps)
-    if n_vis < 2:
+    if n_vis < 8:
         return (None, None, None, n_vis)
 
-    last8 = visible_eps[-8:]
+    is_cont, last8 = check_continuous_eps(visible_eps, signal_date, required_quarters=8, max_days_freshness=200)
+    if not is_cont:
+        return (None, None, None, n_vis)
+
     loss_q = sum(1 for e in last8 if e <= 0)
 
     m = statistics.mean(last8)
     s = statistics.pstdev(last8)
     eps_cv = float(s / abs(m)) if m != 0 else float("inf")
 
-    if len(last8) == 8:
-        rec4 = sum(last8[-4:])
-        prv4 = sum(last8[:4])
-        eps_ttm_growth = float(rec4 / prv4 - 1.0) if prv4 > 0 else None
-    else:
-        eps_ttm_growth = None
+    rec4 = sum(last8[-4:])
+    prv4 = sum(last8[:4])
+    eps_ttm_growth = float(rec4 / prv4 - 1.0) if prv4 > 0 else None
 
     return (eps_cv, loss_q, eps_ttm_growth, n_vis)
 
@@ -182,21 +198,24 @@ def compute_revenue_metrics(
     rev_rows_sorted: list[tuple[str, int, int, str]],
     signal_date: str,
 ) -> float | None:
-    """計算月營收 rev_yoy_3m。
+    """計算月營收 rev_yoy_3m（Item D: 連續 3 個月檢查，缺月或最新一期超過 45 天則回傳 NA）。
     rev_rows_sorted: 依 ym 升冪排序之 (ym, revenue, revenue_last_year, visible_date)。
     回傳 最近可見 3 個月 revenue 合計 / revenue_last_year 合計 − 1 或 None。
     """
     visible_revs = [
-        (ym, rev, rev_ly)
+        (ym, rev, rev_ly, v)
         for ym, rev, rev_ly, v in rev_rows_sorted
         if v <= signal_date and rev is not None and rev_ly is not None
     ]
     if len(visible_revs) < 3:
         return None
 
-    last3 = visible_revs[-3:]
-    sum_cur = sum(r[1] for r in last3)
-    sum_prev = sum(r[2] for r in last3)
+    is_cont, last3 = check_continuous_revenue(visible_revs, signal_date, required_months=3, max_days_freshness=45)
+    if not is_cont:
+        return None
+
+    sum_cur = sum(r[0] for r in last3)
+    sum_prev = sum(r[1] for r in last3)
     if sum_prev <= 0:
         return None
     return float(sum_cur / sum_prev - 1.0)
@@ -317,106 +336,58 @@ def generate_portfolio_equity_curve(
     date_to_idx: dict[str, int],
     div_yield_dict: dict[str, dict[str, float]],
     out_dir: Path,
+    price_rows_by_stock: dict[str, list[tuple[str, float]]] | None = None,
+    corp_actions_map: dict[str, dict[str, float]] | None = None,
+    strats: tuple[str, ...] = ("D0", "D3", "bench"),
 ) -> tuple[pd.DataFrame, dict]:
-    """計算 D0, D3, bench 之 3 個月持有、每月等權換股組合層淨值曲線與指標。
-    輸出 backtest/equity_curve.csv (date, D0, D3, bench)。
+    """計算 D0, D3, bench 等策略之 3 個月持有漂移組合層淨值曲線與指標。
+    Item E 要求：
+    - 3 個 cohort 各自持有 3 個月，隨價格漂移，到期再投入
+    - 跨 cohort 淨額扣費（買入與賣出各 0.3%，合計 0.6%）
+    - 暖機期無選股不扣費
+    - 輸出 backtest/equity_curve.csv
     """
     signals_by_date: dict[str, dict[str, set[str]]] = {}
     for s_date, grp in df_eval.groupby("signal_date"):
-        signals_by_date[s_date] = {
-            "D0": set(grp[grp["D0"]]["stock_id"]),
-            "D3": set(grp[grp["D3"]]["stock_id"]),
-            "bench": set(grp["stock_id"]),
-        }
+        s_map = {}
+        for st in strats:
+            if st == "bench":
+                s_map["bench"] = set(grp["stock_id"])
+            elif st in grp.columns:
+                s_map[st] = set(grp[grp[st]]["stock_id"])
+            else:
+                s_map[st] = set()
+        signals_by_date[s_date] = s_map
+
+    if price_rows_by_stock is None:
+        price_rows_by_stock = {}
+        for sid, pdict in price_dict_by_stock.items():
+            price_rows_by_stock[sid] = sorted(pdict.items(), key=lambda x: x[0])
+
+    if corp_actions_map is None:
+        corp_actions_file = out_dir / "corporate_actions_detected.csv"
+        corp_actions_map = {}
+        if corp_actions_file.exists():
+            ca_df = pd.read_csv(corp_actions_file)
+            for _, r in ca_df.iterrows():
+                corp_actions_map.setdefault(str(r["stock_id"]).zfill(4), {})[str(r["date"])] = float(r["multiplier"])
 
     valid_dates = [d for d in month_signals if d in signals_by_date]
 
-    def _get_stock_1m_ret(sid: str, d_prev: str, d_cur: str) -> float | None:
-        p_dict = price_dict_by_stock.get(sid, {})
-        p_prev = get_close_price(p_dict, all_trading_dates, date_to_idx, d_prev, max_date=d_prev)
-        p_cur = get_close_price(p_dict, all_trading_dates, date_to_idx, d_cur, max_date=d_cur)
-        if p_prev is not None and p_cur is not None and p_prev > 0 and p_cur > 0:
-            return float(p_cur / p_prev - 1.0)
-        return None
+    equity_df, port_metrics = compute_drifted_portfolio_equity_curve(
+        signals_by_date=signals_by_date,
+        valid_dates=valid_dates,
+        price_dict_by_stock=price_dict_by_stock,
+        price_rows_by_stock=price_rows_by_stock,
+        all_trading_dates=all_trading_dates,
+        date_to_idx=date_to_idx,
+        div_yield_dict=div_yield_dict,
+        corp_actions_map=corp_actions_map,
+        strats=strats,
+    )
 
-    monthly_records = []
-    for i in range(1, len(valid_dates)):
-        d_prev = valid_dates[i - 1]
-        d_cur = valid_dates[i]
-        row: dict[str, any] = {"date": d_cur}
-
-        for strat in ("D0", "D3", "bench"):
-            cohort_rets = []
-            for lag in (1, 2, 3):
-                if i - lag >= 0:
-                    sel_date = valid_dates[i - lag]
-                    stks = signals_by_date[sel_date][strat]
-                    if stks:
-                        s_rets = []
-                        for sid in stks:
-                            r_1m = _get_stock_1m_ret(sid, d_prev, d_cur)
-                            if r_1m is not None:
-                                dy = div_yield_dict.get(sid, {}).get(sel_date, 0.0)
-                                if dy is None or np.isnan(dy):
-                                    dy = 0.0
-                                r_1m += (dy / 100.0) * (1.0 / 12.0)
-                                s_rets.append(r_1m)
-                        if s_rets:
-                            cohort_rets.append(float(np.mean(s_rets)))
-                        else:
-                            cohort_rets.append(0.0)
-                    else:
-                        cohort_rets.append(0.0)
-                else:
-                    cohort_rets.append(0.0)
-
-            # 每月等權換股：三個重疊子組合平均，每月 1/3 換股進出成本 0.6% * 1/3 = 0.2%
-            m_ret = float(np.mean(cohort_rets)) - 0.002
-            row[strat] = m_ret
-
-        monthly_records.append(row)
-
-    df_monthly_rets = pd.DataFrame(monthly_records)
-
-    # 建立累積淨值曲線 (起點 1.0)
-    equity_rows = [{"date": valid_dates[0], "D0": 1.0, "D3": 1.0, "bench": 1.0}]
-    cur_eq = {"D0": 1.0, "D3": 1.0, "bench": 1.0}
-    for _, r in df_monthly_rets.iterrows():
-        d_cur = r["date"]
-        for strat in ("D0", "D3", "bench"):
-            cur_eq[strat] *= (1.0 + r[strat])
-        equity_rows.append({
-            "date": d_cur,
-            "D0": cur_eq["D0"],
-            "D3": cur_eq["D3"],
-            "bench": cur_eq["bench"],
-        })
-
-    equity_df = pd.DataFrame(equity_rows)
     equity_csv_path = out_dir / "equity_curve.csv"
     equity_df.to_csv(equity_csv_path, index=False, encoding="utf-8")
-
-    # 指標統計
-    port_metrics = {}
-    for strat in ("D0", "D3", "bench"):
-        rets = df_monthly_rets[strat].values
-        eq_list, max_dd, mdd_idx = compute_equity_and_drawdown(list(rets))
-        final_eq = eq_list[-1]
-        n_m = len(rets)
-        cagr = float((final_eq) ** (12.0 / n_m) - 1.0) if final_eq > 0 else -1.0
-        ann_vol = float(np.std(rets, ddof=1) * np.sqrt(12.0))
-        sharpe = float((np.mean(rets) * 12.0) / ann_vol) if ann_vol > 0 else 0.0
-        mdd_date = df_monthly_rets["date"].iloc[mdd_idx - 1] if mdd_idx > 0 else "N/A"
-
-        port_metrics[strat] = {
-            "final_equity": final_eq,
-            "cagr": cagr,
-            "ann_vol": ann_vol,
-            "max_dd": max_dd,
-            "mdd_date": mdd_date,
-            "sharpe": sharpe,
-        }
-
     return equity_df, port_metrics
 
 
@@ -448,7 +419,7 @@ def compute_d_tiers(record: dict, rank_threshold: float = 0.75) -> dict:
     is_d1 = bool(is_d0 and not is_sp)
     is_d2 = bool(is_d1 and not is_div)
     is_d3 = bool(is_d2 and is_qual_ok)
-    is_d4 = bool(is_d3 and pos <= 2.0)
+    is_d4 = bool(is_d3 and (pos is not None and pos <= 2.0))
     is_d5 = bool(is_d3 and (ry is not None and ry > 0))
 
     return {"D0": is_d0, "D1": is_d1, "D2": is_d2, "D3": is_d3, "D4": is_d4, "D5": is_d5}
@@ -469,19 +440,36 @@ def run_backtest(
     out_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
 
-    # 1. 取得 universe 股票池
-    universe_rows = conn.execute(
-        "SELECT DISTINCT stock_id FROM valuation_screen ORDER BY stock_id"
-    ).fetchall()
-    universe_stocks = set(r[0] for r in universe_rows)
+    # 1. 取得 universe 股票池 (2026 存活成分股回顧回測，凍結於 universe_2026_survivors.csv)
+    surv_file = out_dir / "universe_2026_survivors.csv"
+    if surv_file.exists():
+        df_surv = pd.read_csv(surv_file, dtype={"stock_id": str})
+    else:
+        conn_tmp = sqlite3.connect(db_path)
+        u_rows = conn_tmp.execute("SELECT DISTINCT stock_id FROM valuation_screen ORDER BY stock_id").fetchall()
+        sub_tmp = dict(conn_tmp.execute("SELECT stock_id, sub FROM stock_sub_industry").fetchall())
+        df_surv = pd.DataFrame({
+            "stock_id": [r[0] for r in u_rows],
+            "universe": "ai_chain;semiconductor",
+            "sub": [sub_tmp.get(r[0], "其他") for r in u_rows],
+            "first_close_date": None,
+        })
+        conn_tmp.close()
+    universe_stocks = sorted(df_surv["stock_id"].astype(str).str.zfill(4).tolist())
+    first_close_date_map = dict(zip(df_surv["stock_id"].astype(str).str.zfill(4), df_surv["first_close_date"]))
+    surv_sub_map = dict(zip(df_surv["stock_id"].astype(str).str.zfill(4), df_surv["sub"]))
 
-    # 2. 取得 sub 產業映射（第一列，若查無則標「其他」）
+    # 2. 取得 sub 產業映射
     sub_map: dict[str, str] = {}
     for sid, sub in conn.execute(
         "SELECT stock_id, sub FROM stock_sub_industry ORDER BY stock_id, node"
     ).fetchall():
-        if sid not in sub_map:
-            sub_map[sid] = sub
+        sub_map[str(sid).zfill(4)] = sub
+    for sid in universe_stocks:
+        if sid in surv_sub_map and isinstance(surv_sub_map[sid], str) and surv_sub_map[sid].strip():
+            sub_map[sid] = surv_sub_map[sid]
+        elif sid not in sub_map:
+            sub_map[sid] = "其他"
 
     # 3. 取得各表最早日期統計
     earliest_dates = {}
@@ -503,13 +491,22 @@ def run_backtest(
     all_trading_dates = dates_df["date"].tolist()
     date_to_idx = {d: i for i, d in enumerate(all_trading_dates)}
     dates_s = pd.to_datetime(dates_df["date"])
-    month_signals = dates_df.groupby(dates_s.dt.to_period("M"))["date"].max().tolist()
+    month_signals = filter_complete_month_signals(all_trading_dates)
+
+    # 載入公司行動表
+    corp_actions_file = out_dir / "corporate_actions_detected.csv"
+    corp_actions_map: dict[str, dict[str, float]] = {}
+    if corp_actions_file.exists():
+        ca_df = pd.read_csv(corp_actions_file, dtype={"stock_id": str})
+        for _, r in ca_df.iterrows():
+            corp_actions_map.setdefault(str(r["stock_id"]).zfill(4), {})[str(r["date"])] = float(r["multiplier"])
 
     # 5. 批次載入 universe 相關資料至記憶體
     df_per = pd.read_sql(
         "SELECT stock_id, date, per, dividend_yield FROM per_daily ORDER BY stock_id, date",
         conn,
     )
+    df_per["stock_id"] = df_per["stock_id"].astype(str).str.zfill(4)
     df_per = df_per[df_per["stock_id"].isin(universe_stocks)]
     df_per_valid = df_per[(df_per["per"] > 0) & (df_per["per"] <= 300)]
     per_by_stock: dict[str, list[tuple[str, float]]] = {}
@@ -524,6 +521,7 @@ def run_backtest(
         "SELECT stock_id, date, close FROM fm_price_daily WHERE close > 0 ORDER BY stock_id, date",
         conn,
     )
+    df_price["stock_id"] = df_price["stock_id"].astype(str).str.zfill(4)
     df_price = df_price[df_price["stock_id"].isin(universe_stocks)]
     price_rows_by_stock: dict[str, list[tuple[str, float]]] = {}
     price_dict_by_stock: dict[str, dict[str, float]] = {}
@@ -535,6 +533,7 @@ def run_backtest(
         "SELECT stock_id, quarter_end, eps FROM eps_quarterly WHERE eps IS NOT NULL ORDER BY stock_id, quarter_end",
         conn,
     )
+    df_eps["stock_id"] = df_eps["stock_id"].astype(str).str.zfill(4)
     df_eps = df_eps[df_eps["stock_id"].isin(universe_stocks)]
     eps_by_stock: dict[str, list[tuple[str, float, str]]] = {}
     for sid, grp in df_eps.groupby("stock_id"):
@@ -551,6 +550,7 @@ def run_backtest(
     )
     rev_by_stock: dict[str, list[tuple[str, int, int, str]]] = {}
     if not df_rev.empty:
+        df_rev["stock_id"] = df_rev["stock_id"].astype(str).str.zfill(4)
         df_rev = df_rev[df_rev["stock_id"].isin(universe_stocks)]
         for sid, grp in df_rev.groupby("stock_id"):
             rev_by_stock[sid] = [
@@ -573,67 +573,81 @@ def run_backtest(
         }
         tgt_date_3m = month_signals[i - 3] if i >= 3 else None
         tgt_date_1m = month_signals[i - 1] if i >= 1 else None
+        tgt_date_12m = month_signals[i - 12] if i >= 12 else None
 
         month_stocks: list[dict] = []
 
         for sid in sorted(universe_stocks):
             sub = sub_map.get(sid, "其他")
-            per_rows = per_by_stock.get(sid, [])
-            per_res = compute_per_position(per_rows, sig_date)
-            if per_res is None:
-                continue
+            price_rows = price_rows_by_stock.get(sid, [])
+            first_date = first_close_date_map.get(sid)
 
-            cur_per, p25, p75, position, n_per_pts = per_res
+            if not check_stock_eligibility(sid, sig_date, all_trading_dates, date_to_idx, price_rows, first_date):
+                continue
 
             price_dict = price_dict_by_stock.get(sid, {})
             p_cur = get_close_price(price_dict, all_trading_dates, date_to_idx, sig_date, max_date=sig_date)
             if p_cur is None or p_cur <= 0:
                 continue
 
-            # 前瞻報酬
-            fwd_rets: dict[str, float | None] = {}
-            for h, tgt_d in target_dates.items():
-                if tgt_d is None:
-                    fwd_rets[h] = None
-                else:
-                    p_tgt = get_close_price(price_dict, all_trading_dates, date_to_idx, tgt_d)
-                    if p_tgt is not None and p_tgt > 0:
-                        fwd_rets[h] = float(p_tgt / p_cur - 1.0)
-                    else:
-                        fwd_rets[h] = None
-
-            # 殖利率取訊號日 per_daily 值，缺值當 0
             dy_raw = div_yield_dict.get(sid, {}).get(sig_date)
             div_yield_at_sig = float(dy_raw) if (dy_raw is not None and not np.isnan(dy_raw)) else 0.0
 
-            # 含股利近似與扣成本報酬
-            fwd_rets_tr: dict[str, float | None] = {}
-            fwd_rets_net: dict[str, float | None] = {}
-            for h, months in (("3m", 3), ("6m", 6), ("12m", 12)):
-                r_pr = fwd_rets[h]
-                r_tr = compute_total_return(r_pr, div_yield_at_sig, months)
-                r_net = compute_net_return(r_tr, cost=0.006)
-                fwd_rets_tr[h] = r_tr
-                fwd_rets_net[h] = r_net
+            corp_actions_for_stock = corp_actions_map.get(sid, {})
 
-            # 分割偵測
-            price_rows = price_rows_by_stock.get(sid, [])
+            stock_fwd = compute_stock_forward_returns(
+                sid=sid,
+                sig_date=sig_date,
+                target_dates=target_dates,
+                price_dict=price_dict,
+                price_rows=price_rows,
+                all_trading_dates=all_trading_dates,
+                date_to_idx=date_to_idx,
+                corp_actions_map=corp_actions_for_stock,
+                div_yield_at_sig=div_yield_at_sig,
+            )
+            fwd_rets = {h: stock_fwd[f"ret_{h}"] for h in ("3m", "6m", "12m")}
+            fwd_rets_tr = {h: stock_fwd[f"ret_{h}_tr"] for h in ("3m", "6m", "12m")}
+            fwd_rets_net = {h: stock_fwd[f"ret_{h}_net"] for h in ("3m", "6m", "12m")}
+
             is_split = detect_split_flag(price_rows, sig_date)
 
-            # EPS 品質指標
             eps_rows = eps_by_stock.get(sid, [])
             eps_cv, loss_q, eps_ttm_growth, n_eps_vis = compute_eps_metrics(eps_rows, sig_date)
 
-            # 營收指標
             rev_rows = rev_by_stock.get(sid, [])
             rev_yoy_3m = compute_revenue_metrics(rev_rows, sig_date)
 
-            # 動能指標 (Point-in-time，只用 <= sig_date 價格)
-            mom_3m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_3m)
-            mom_1m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_1m)
+            if check_corp_action_in_window(corp_actions_for_stock, tgt_date_3m, sig_date):
+                mom_3m = None
+            else:
+                mom_3m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_3m)
 
-            # 濾網判定
-            is_l0 = bool(position < 0)
+            if check_corp_action_in_window(corp_actions_for_stock, tgt_date_1m, sig_date):
+                mom_1m = None
+            else:
+                mom_1m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_1m)
+
+            if tgt_date_12m is not None and tgt_date_1m is not None and not check_corp_action_in_window(corp_actions_for_stock, tgt_date_12m, tgt_date_1m):
+                p_1m = get_close_price(price_dict, all_trading_dates, date_to_idx, tgt_date_1m, max_date=tgt_date_1m)
+                p_12m = get_close_price(price_dict, all_trading_dates, date_to_idx, tgt_date_12m, max_date=tgt_date_12m)
+                mom_12_1 = (p_1m / p_12m - 1.0) if (p_1m and p_12m and p_12m > 0) else None
+            else:
+                mom_12_1 = None
+
+            dt_3y_start = get_3y_start_date(sig_date)
+            if check_corp_action_in_per_window(corp_actions_for_stock, dt_3y_start, sig_date):
+                per_res = None
+            else:
+                per_rows = per_by_stock.get(sid, [])
+                per_res = compute_per_position(per_rows, sig_date)
+
+            if per_res is not None:
+                cur_per, p25, p75, position, n_per_pts = per_res
+            else:
+                cur_per, p25, p75, position, n_per_pts = None, None, None, None, 0
+
+            is_l0 = bool(position is not None and position < 0)
             is_l1 = bool(
                 is_l0
                 and (eps_cv is not None and eps_cv < 0.5)
@@ -668,10 +682,15 @@ def run_backtest(
                 "is_l1": is_l1,
                 "is_l2": is_l2,
                 "position": position,
+                "cur_per": cur_per,
+                "p25": p25,
+                "p75": p75,
+                "n_per_pts": n_per_pts,
                 "eps_cv": eps_cv,
                 "rev_yoy_3m": rev_yoy_3m,
                 "mom_3m": mom_3m,
                 "mom_1m": mom_1m,
+                "mom_12_1": mom_12_1,
                 "ret_3m": fwd_rets["3m"],
                 "ret_6m": fwd_rets["6m"],
                 "ret_12m": fwd_rets["12m"],
@@ -688,13 +707,18 @@ def run_backtest(
                 "eps_ttm_growth": eps_ttm_growth,
                 "n_eps_vis": n_eps_vis,
                 "is_universe": True,
+                "exit_reason_3m": stock_fwd.get("exit_reason_3m", "none"),
+                "exit_reason_6m": stock_fwd.get("exit_reason_6m", "none"),
+                "exit_reason_12m": stock_fwd.get("exit_reason_12m", "none"),
+                "ret_3m_old": stock_fwd.get("ret_3m_old"),
+                "ret_6m_old": stock_fwd.get("ret_6m_old"),
+                "ret_12m_old": stock_fwd.get("ret_12m_old"),
             }
             month_stocks.append(stock_record)
 
         eval_stock_counts_per_month.append(len(month_stocks))
 
         if month_stocks:
-            # 1. 前瞻報酬基準（純價格、含股利近似、扣成本）
             for ret_sfx in ("", "_tr", "_net"):
                 for h in ("3m", "6m", "12m"):
                     col = f"ret_{h}{ret_sfx}"
@@ -715,74 +739,58 @@ def run_backtest(
                         s[b_col] = bench_val
                         s[sb_col] = sub_bench_val.get(s["sub"], bench_val)
 
-            # 2. 計算同月同 sub 等權 mom 與 rel_mom
             compute_sub_relative_momentum(month_stocks)
 
-            # 3. 計算 rel_mom_rank (同月全 universe 百分位 0–1)
-            ranks = compute_percentile_rank([s["rel_mom_3m"] for s in month_stocks])
-            for s, rk in zip(month_stocks, ranks):
+            ranks_3m = compute_percentile_rank([s["rel_mom_3m"] for s in month_stocks])
+            ranks_12_1 = compute_percentile_rank([s["mom_12_1"] for s in month_stocks])
+            for s, rk, rk12 in zip(month_stocks, ranks_3m, ranks_12_1):
                 s["rel_mom_rank"] = rk
+                s["mom_12_1_rank"] = rk12
 
-            # 4. 新增層旗標判定 (M1, M2, M3, C1, C2 與 D0–D5, D3@0.6, D3@0.9)
             for s in month_stocks:
                 r_m3 = s["rel_mom_3m"]
                 r_m1 = s["rel_mom_1m"]
                 rk = s["rel_mom_rank"]
+                rk12 = s.get("mom_12_1_rank")
                 pos = s["position"]
-                is_sp = s["is_split"]
-                is_div = s["is_diverge"]
-                n_ev = s["n_eps_vis"]
-                ecv = s["eps_cv"]
-                lq = s["loss_q"]
-                ry = s["rev_yoy_3m"]
 
                 is_m1 = bool(s["is_l1"] and r_m3 is not None and r_m3 > 0)
                 is_m2 = bool(is_m1 and r_m1 is not None and r_m1 > 0)
                 is_m3 = bool(s["is_l0"] and r_m3 is not None and r_m3 > 0)
                 is_c1 = bool(rk is not None and rk >= 0.75)
-                is_c2 = bool(is_c1 and pos < 0)
+                is_c1_per = bool(is_c1 and pos is not None)
+                is_c2 = bool(is_c1 and pos is not None and pos < 0)
+                is_mom_12_1 = bool(rk12 is not None and rk12 >= 0.75)
 
                 s["is_m1"] = is_m1
                 s["is_m2"] = is_m2
                 s["is_m3"] = is_m3
                 s["is_c1"] = is_c1
+                s["is_c1_per"] = is_c1_per
                 s["is_c2"] = is_c2
+                s["is_mom_12_1"] = is_mom_12_1
 
                 s["M1"] = is_m1
                 s["M2"] = is_m2
                 s["M3"] = is_m3
                 s["C1"] = is_c1
+                s["C1_PER"] = is_c1_per
                 s["C2"] = is_c2
+                s["MOM_12_1"] = is_mom_12_1
 
-                # D 層定義（在 C1 基礎上逐層排除，每層都是前一層的子集）
                 d_tiers = compute_d_tiers(s, rank_threshold=0.75)
-                is_d0 = d_tiers["D0"]
-                is_d1 = d_tiers["D1"]
-                is_d2 = d_tiers["D2"]
-                is_d3 = d_tiers["D3"]
-                is_d4 = d_tiers["D4"]
-                is_d5 = d_tiers["D5"]
+                s.update(d_tiers)
+                s["is_d0"] = d_tiers["D0"]
+                s["is_d1"] = d_tiers["D1"]
+                s["is_d2"] = d_tiers["D2"]
+                s["is_d3"] = d_tiers["D3"]
+                s["is_d4"] = d_tiers["D4"]
+                s["is_d5"] = d_tiers["D5"]
 
-                is_d3_06 = compute_d_tiers(s, rank_threshold=0.6)["D3"]
-                is_d3_09 = compute_d_tiers(s, rank_threshold=0.9)["D3"]
-
-                s["is_d0"] = is_d0
-                s["is_d1"] = is_d1
-                s["is_d2"] = is_d2
-                s["is_d3"] = is_d3
-                s["is_d4"] = is_d4
-                s["is_d5"] = is_d5
-                s["is_d3_06"] = is_d3_06
-                s["is_d3_09"] = is_d3_09
-
-                s["D0"] = is_d0
-                s["D1"] = is_d1
-                s["D2"] = is_d2
-                s["D3"] = is_d3
-                s["D4"] = is_d4
-                s["D5"] = is_d5
-                s["D3@0.6"] = is_d3_06
-                s["D3@0.9"] = is_d3_09
+                s["D3@0.6"] = compute_d_tiers(s, rank_threshold=0.6)["D3"]
+                s["D3@0.9"] = compute_d_tiers(s, rank_threshold=0.9)["D3"]
+                s["is_d3_06"] = s["D3@0.6"]
+                s["is_d3_09"] = s["D3@0.9"]
 
             all_eval_rows.extend(month_stocks)
 
@@ -791,15 +799,17 @@ def run_backtest(
     has_signal = df_eval["is_l0"] | df_eval["C1"]
     signals_df = df_eval[has_signal].copy()
     signals_cols = [
-        "signal_date", "stock_id", "sub", "level", "position", "eps_cv", "rev_yoy_3m",
+        "signal_date", "stock_id", "sub", "level", "is_l0", "is_l1", "is_l2", "position", "eps_cv", "rev_yoy_3m",
         "dividend_yield_at_signal",
         "ret_3m", "ret_6m", "ret_12m",
         "ret_3m_tr", "ret_6m_tr", "ret_12m_tr",
         "ret_3m_net", "ret_6m_net", "ret_12m_net",
         "bench_3m", "bench_6m", "bench_12m",
         "sub_bench_3m", "sub_bench_6m", "sub_bench_12m",
-        "mom_3m", "mom_1m", "rel_mom_3m", "rel_mom_1m", "rel_mom_rank",
-        "M1", "M2", "M3", "C1", "C2",
+        "exit_reason_3m", "exit_reason_6m", "exit_reason_12m",
+        "ret_3m_old", "ret_6m_old", "ret_12m_old",
+        "mom_3m", "mom_1m", "mom_12_1", "rel_mom_3m", "rel_mom_1m", "rel_mom_rank",
+        "M1", "M2", "M3", "C1", "C1_PER", "C2", "MOM_12_1",
         "D0", "D1", "D2", "D3", "D4", "D5",
     ]
     signals_out = signals_df[signals_cols].copy()
@@ -974,7 +984,9 @@ def generate_summary_markdown(
     stats_m2 = calculate_tier_performance(df_eval, "is_m2")
     stats_m3 = calculate_tier_performance(df_eval, "is_m3")
     stats_c1 = calculate_tier_performance(df_eval, "is_c1")
+    stats_c1_per = calculate_tier_performance(df_eval, "is_c1_per")
     stats_c2 = calculate_tier_performance(df_eval, "is_c2")
+    stats_mom_12_1 = calculate_tier_performance(df_eval, "is_mom_12_1")
 
     # D 層與基準統計（三個口徑）
     d_tier_defs = [
@@ -1117,8 +1129,8 @@ def generate_summary_markdown(
         "",
         "1. **不含股利（Price Return Only）**：",
         "   前瞻報酬以價格收盤價直接計算，未還原除權息現金股利與股票股利。低估值股票通常具備較高之現金殖利率（Dividend Yield），因此策略實際之總報酬（Total Return）應優於此處呈現之純價格報酬。",
-        "2. **存活者偏誤（Survivorship Bias）**：",
-        "   Universe 標的取自目前 `valuation_screen` 中的 237 檔股票清單（當前活躍之 AI 主鏈與半導體成分股），歷史上已下市、被合併或遭汰除之劣質標的未納入回測股票池，存在一定之存活者偏差。",
+        "2. **存活者偏誤正名（Survivorship Bias: Conditional on 2026 Survivors）**：",
+        "   本回測母體一律稱之為 `universe_2026_survivors`，係取自 2026-09 存活且列入題材清單之 237 檔標的。此為「存活成分股之回顧性條件回測（conditional on 2026 survivors）」，天生帶有事後存活資訊，嚴禁宣稱無存活者偏誤。",
         "3. **樣本期間（Sample Period）**：",
         "   目前回測時間範圍為 2021-01 至 2026-09。扣除 1 年 PER 視窗累積期與未來 12 個月前瞻報酬所需期間後，有效驗證區間主要集中在 2022 至 2025 年，歷經 2022 年半導體庫存調整與 2023-2024 年 AI 暴漲行情，週期跨度受限於歷史資料回填進度。",
         "4. **橫斷面相關性與按月算勝率之理由（Cross-sectional Correlation）**：",
@@ -1135,8 +1147,14 @@ def generate_summary_markdown(
         "### M3：L0 且 rel_mom_3m > 0（不要品質層，看動能單獨加在便宜上的效果）",
         format_stat_table(stats_m3),
         "",
-        "### C1 對照組：rel_mom_rank ≥ 0.75，不看估值（純動能，用來判斷估值有沒有額外貢獻）",
+        "### C1 對照組：rel_mom_rank ≥ 0.75，不看估值（全體可投資池純動能前 25%）",
         format_stat_table(stats_c1),
+        "",
+        "### C1_PER 對照組：C1 且 PER 可算（估值層可評估子集）",
+        format_stat_table(stats_c1_per),
+        "",
+        "### MOM_12_1 對照組：12-1 個月傳統動能前 25%",
+        format_stat_table(stats_mom_12_1),
         "",
         "### C2 對照組：rel_mom_rank ≥ 0.75 且位置 < 0（動能前四分之一裡的便宜股）",
         format_stat_table(stats_c2),
