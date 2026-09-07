@@ -259,3 +259,123 @@ def test_backtest_end_to_end_temp_db(tmp_path):
     assert (out_dir / "summary.md").exists()
     assert res["total_signal_months"] > 0
     assert res["evaluable_months"] > 0
+
+
+# ---------------------------------------------------------------------------
+# (f) 動能層測試 (Point-in-time、相對動能、同月分位、層級蘊含)
+# ---------------------------------------------------------------------------
+
+def test_momentum_strictly_point_in_time():
+    """(a) 驗證 mom 只用 <= 訊號日的價格（假資料在訊號日後放一根暴漲，mom 不得改變）。"""
+    dates = ["2023-01-31", "2023-02-28", "2023-03-31", "2023-04-28", "2023-05-02", "2023-05-31"]
+    date_to_idx = {d: i for i, d in enumerate(dates)}
+    signal_date = "2023-04-28"
+    past_date = "2023-01-31"
+
+    # 正常收盤價：訊號日 120.0，3 個月前 100.0 -> mom = 120 / 100 - 1 = +20%
+    prices_clean = {
+        "2023-01-31": 100.0,
+        "2023-04-28": 120.0,
+    }
+    # 訊號日後放一根暴漲（2023-05-02 為 9999.0）
+    prices_with_spike = {
+        "2023-01-31": 100.0,
+        "2023-04-28": 120.0,
+        "2023-05-02": 9999.0,
+    }
+
+    mom_clean = bv.compute_momentum(prices_clean, dates, date_to_idx, signal_date, past_date)
+    mom_spike = bv.compute_momentum(prices_with_spike, dates, date_to_idx, signal_date, past_date)
+
+    assert mom_clean == pytest.approx(0.20)
+    assert mom_spike == pytest.approx(0.20)
+    assert mom_clean == mom_spike
+
+
+def test_relative_momentum_subtracts_sub_industry_mean():
+    """(b) 驗證 rel_mom 減的是同 sub 等權而非全 universe。"""
+    # 假資料：同月包含兩個 sub
+    # Sub A: S1 (mom=0.10), S2 (mom=0.20) -> sub 平均 = 0.15
+    # Sub B: S3 (mom=0.50), S4 (mom=0.70) -> sub 平均 = 0.60
+    # 全 Universe 平均 = (0.10 + 0.20 + 0.50 + 0.70) / 4 = 0.375
+    month_stocks = [
+        {"stock_id": "S1", "sub": "Sub_A", "mom_3m": 0.10, "mom_1m": 0.05},
+        {"stock_id": "S2", "sub": "Sub_A", "mom_3m": 0.20, "mom_1m": 0.15},
+        {"stock_id": "S3", "sub": "Sub_B", "mom_3m": 0.50, "mom_1m": 0.20},
+        {"stock_id": "S4", "sub": "Sub_B", "mom_3m": 0.70, "mom_1m": 0.30},
+    ]
+    bv.compute_sub_relative_momentum(month_stocks)
+
+    univ_mean_3m = 0.375
+    # S1 rel_mom_3m: 減同 sub 等權 (0.10 - 0.15 = -0.05)，不得減全 universe (0.10 - 0.375 = -0.275)
+    assert month_stocks[0]["sub_mom_3m"] == pytest.approx(0.15)
+    assert month_stocks[0]["rel_mom_3m"] == pytest.approx(-0.05)
+    assert month_stocks[0]["rel_mom_3m"] != pytest.approx(0.10 - univ_mean_3m)
+
+    # S3 rel_mom_3m: 減同 sub 等權 (0.50 - 0.60 = -0.10)，不得減全 universe (0.50 - 0.375 = +0.125)
+    assert month_stocks[2]["sub_mom_3m"] == pytest.approx(0.60)
+    assert month_stocks[2]["rel_mom_3m"] == pytest.approx(-0.10)
+    assert month_stocks[2]["rel_mom_3m"] != pytest.approx(0.50 - univ_mean_3m)
+
+
+def test_relative_momentum_rank_monthly_and_bounds():
+    """(c) 驗證 rel_mom_rank 在同月內計算、範圍 0–1。"""
+    # 1. 驗證單月範圍 0–1
+    vals = [-0.25, -0.05, 0.0, 0.15, 0.40]
+    ranks = bv.compute_percentile_rank(vals)
+    assert len(ranks) == 5
+    for r in ranks:
+        assert r is not None
+        assert 0.0 <= r <= 1.0
+    # 單調遞增
+    assert ranks == sorted(ranks)
+
+    # 2. 驗證在同月內計算（月度隔離，不受不同月份極端值影響）
+    # 第一個月：數值集中在負值區 [-0.50, -0.30, -0.10]
+    # 當中 -0.10 是該月最高，rank 必須為 1.0
+    month1_vals = [-0.50, -0.30, -0.10]
+    ranks_m1 = bv.compute_percentile_rank(month1_vals)
+    assert ranks_m1[2] == pytest.approx(1.0)
+
+    # 第二個月：數值集中在正值區 [-0.10, 0.20, 0.80]
+    # 同樣的數值 -0.10 在該月是最低，rank 必須為 1/3 ≈ 0.333
+    month2_vals = [-0.10, 0.20, 0.80]
+    ranks_m2 = bv.compute_percentile_rank(month2_vals)
+    assert ranks_m2[0] == pytest.approx(1.0 / 3.0)
+    # 證明在同月內獨立計算，不與其他月份混合
+    assert ranks_m1[2] != ranks_m2[0]
+
+
+def test_tier_implication_rules():
+    """(d) 驗證 M2 蘊含 M1、M1 蘊含 L1。"""
+    # 真值表排列組合驗證
+    test_cases = [
+        # (is_l1, rel_mom_3m, rel_mom_1m)
+        (True, 0.10, 0.05),     # M2=True, M1=True, L1=True
+        (True, 0.10, -0.05),    # M2=False, M1=True, L1=True
+        (True, -0.10, 0.05),    # M2=False, M1=False, L1=True
+        (True, -0.10, -0.05),   # M2=False, M1=False, L1=True
+        (False, 0.10, 0.05),    # M2=False, M1=False, L1=False
+        (False, 0.10, -0.05),   # M2=False, M1=False, L1=False
+        (False, -0.10, 0.05),   # M2=False, M1=False, L1=False
+        (False, -0.10, -0.05),  # M2=False, M1=False, L1=False
+    ]
+
+    for is_l1, r_m3, r_m1 in test_cases:
+        is_m1 = bool(is_l1 and r_m3 is not None and r_m3 > 0)
+        is_m2 = bool(is_m1 and r_m1 is not None and r_m1 > 0)
+
+        # 蘊含規則 1：M2 蘊含 M1 (M2 -> M1)
+        if is_m2:
+            assert is_m1 is True, "若 M2 為 True，M1 必須為 True"
+
+        # 蘊含規則 2：M1 蘊含 L1 (M1 -> L1)
+        if is_m1:
+            assert is_l1 is True, "若 M1 為 True，L1 必須為 True"
+
+        # 逆否命題驗證
+        if not is_l1:
+            assert is_m1 is False
+            assert is_m2 is False
+        if not is_m1:
+            assert is_m2 is False

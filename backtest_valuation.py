@@ -191,8 +191,13 @@ def get_close_price(
     all_trading_dates: list[str],
     date_to_idx: dict[str, int],
     target_date: str,
+    max_date: str | None = None,
 ) -> float | None:
-    """取得目標日收盤價，優先當日，若無則在前後 5 個交易日內尋找最近收盤價。"""
+    """取得目標日收盤價，優先當日，若無則在前後 5 個交易日內尋找最近收盤價。
+    若指定 max_date，嚴格排除 date > max_date 的價格（Point-in-time 保護）。
+    """
+    if max_date is not None and target_date > max_date:
+        return None
     if target_date in prices_dict:
         return prices_dict[target_date]
     if target_date not in date_to_idx:
@@ -203,9 +208,71 @@ def get_close_price(
         cand_idx = tgt_idx + offset
         if 0 <= cand_idx < len(all_trading_dates):
             cand_d = all_trading_dates[cand_idx]
+            if max_date is not None and cand_d > max_date:
+                continue
             if cand_d in prices_dict:
                 return prices_dict[cand_d]
     return None
+
+
+def compute_momentum(
+    prices_dict: dict[str, float],
+    all_trading_dates: list[str],
+    date_to_idx: dict[str, int],
+    signal_date: str,
+    past_date: str | None,
+) -> float | None:
+    """計算動能指標：訊號日收盤 / 過去目標日收盤 − 1。
+    嚴格 Point-in-time：只用 date <= signal_date 的價格。
+    """
+    if past_date is None:
+        return None
+    p_cur = get_close_price(prices_dict, all_trading_dates, date_to_idx, signal_date, max_date=signal_date)
+    p_past = get_close_price(prices_dict, all_trading_dates, date_to_idx, past_date, max_date=signal_date)
+    if p_cur is not None and p_past is not None and p_past > 0 and p_cur > 0:
+        return float(p_cur / p_past - 1.0)
+    return None
+
+
+def compute_sub_relative_momentum(month_stock_records: list[dict]) -> None:
+    """計算同月同 sub 等權 mom 與 rel_mom (mom − sub_mom)，就地更新 month_stock_records。"""
+    for period in ("3m", "1m"):
+        mom_col = f"mom_{period}"
+        sub_col = f"sub_mom_{period}"
+        rel_col = f"rel_mom_{period}"
+
+        sub_groups: dict[str, list[float]] = {}
+        for s in month_stock_records:
+            m_val = s.get(mom_col)
+            if m_val is not None:
+                sub_groups.setdefault(s["sub"], []).append(m_val)
+
+        sub_means = {sub: float(np.mean(vals)) for sub, vals in sub_groups.items() if vals}
+
+        for s in month_stock_records:
+            sub = s["sub"]
+            sub_m = sub_means.get(sub)
+            s[sub_col] = sub_m
+            m_val = s.get(mom_col)
+            if m_val is not None and sub_m is not None:
+                s[rel_col] = float(m_val - sub_m)
+            else:
+                s[rel_col] = None
+
+
+def compute_percentile_rank(values: list[float | None]) -> list[float | None]:
+    """計算數列在當月有效值中的百分位數 (0–1)。
+    使用 pandas rank(pct=True)，值域在 (0, 1] 之間，NaN 保持 None。
+    """
+    valid_indices = [i for i, v in enumerate(values) if v is not None]
+    if not valid_indices:
+        return [None] * len(values)
+    s = pd.Series([values[i] for i in valid_indices])
+    ranks = s.rank(pct=True).tolist()
+    res: list[float | None] = [None] * len(values)
+    for idx, r in zip(valid_indices, ranks):
+        res[idx] = float(r)
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +387,8 @@ def run_backtest(
             h: month_signals[i + off] if (i + off < len(month_signals)) else None
             for h, off in horizon_offsets.items()
         }
+        tgt_date_3m = month_signals[i - 3] if i >= 3 else None
+        tgt_date_1m = month_signals[i - 1] if i >= 1 else None
 
         month_stocks: list[dict] = []
 
@@ -333,7 +402,7 @@ def run_backtest(
             cur_per, p25, p75, position, n_per_pts = per_res
 
             price_dict = price_dict_by_stock.get(sid, {})
-            p_cur = get_close_price(price_dict, all_trading_dates, date_to_idx, sig_date)
+            p_cur = get_close_price(price_dict, all_trading_dates, date_to_idx, sig_date, max_date=sig_date)
             if p_cur is None or p_cur <= 0:
                 continue
 
@@ -360,6 +429,10 @@ def run_backtest(
             # 營收指標
             rev_rows = rev_by_stock.get(sid, [])
             rev_yoy_3m = compute_revenue_metrics(rev_rows, sig_date)
+
+            # 動能指標 (Point-in-time，只用 <= sig_date 價格)
+            mom_3m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_3m)
+            mom_1m = compute_momentum(price_dict, all_trading_dates, date_to_idx, sig_date, tgt_date_1m)
 
             # 濾網判定
             is_l0 = bool(position < 0)
@@ -399,6 +472,8 @@ def run_backtest(
                 "position": position,
                 "eps_cv": eps_cv,
                 "rev_yoy_3m": rev_yoy_3m,
+                "mom_3m": mom_3m,
+                "mom_1m": mom_1m,
                 "ret_3m": fwd_rets["3m"],
                 "ret_6m": fwd_rets["6m"],
                 "ret_12m": fwd_rets["12m"],
@@ -408,6 +483,7 @@ def run_backtest(
         eval_stock_counts_per_month.append(len(month_stocks))
 
         if month_stocks:
+            # 1. 前瞻報酬基準
             for h in ("3m", "6m", "12m"):
                 col = f"ret_{h}"
                 valid_rets = [s[col] for s in month_stocks if s[col] is not None]
@@ -425,16 +501,52 @@ def run_backtest(
                     s[f"bench_{h}"] = bench_val
                     s[f"sub_bench_{h}"] = sub_bench_val.get(s["sub"], bench_val)
 
+            # 2. 計算同月同 sub 等權 mom 與 rel_mom
+            compute_sub_relative_momentum(month_stocks)
+
+            # 3. 計算 rel_mom_rank (同月全 universe 百分位 0–1)
+            ranks = compute_percentile_rank([s["rel_mom_3m"] for s in month_stocks])
+            for s, rk in zip(month_stocks, ranks):
+                s["rel_mom_rank"] = rk
+
+            # 4. 新增層旗標判定 (M1, M2, M3, C1, C2)
+            for s in month_stocks:
+                r_m3 = s["rel_mom_3m"]
+                r_m1 = s["rel_mom_1m"]
+                rk = s["rel_mom_rank"]
+                pos = s["position"]
+
+                is_m1 = bool(s["is_l1"] and r_m3 is not None and r_m3 > 0)
+                is_m2 = bool(is_m1 and r_m1 is not None and r_m1 > 0)
+                is_m3 = bool(s["is_l0"] and r_m3 is not None and r_m3 > 0)
+                is_c1 = bool(rk is not None and rk >= 0.75)
+                is_c2 = bool(is_c1 and pos < 0)
+
+                s["is_m1"] = is_m1
+                s["is_m2"] = is_m2
+                s["is_m3"] = is_m3
+                s["is_c1"] = is_c1
+                s["is_c2"] = is_c2
+
+                s["M1"] = is_m1
+                s["M2"] = is_m2
+                s["M3"] = is_m3
+                s["C1"] = is_c1
+                s["C2"] = is_c2
+
             all_eval_rows.extend(month_stocks)
 
     df_eval = pd.DataFrame(all_eval_rows)
 
-    signals_df = df_eval[df_eval["is_l0"]].copy()
+    has_signal = df_eval["is_l0"] | df_eval["C1"]
+    signals_df = df_eval[has_signal].copy()
     signals_cols = [
         "signal_date", "stock_id", "sub", "level", "position", "eps_cv", "rev_yoy_3m",
         "ret_3m", "ret_6m", "ret_12m",
         "bench_3m", "bench_6m", "bench_12m",
         "sub_bench_3m", "sub_bench_6m", "sub_bench_12m",
+        "mom_3m", "mom_1m", "rel_mom_3m", "rel_mom_1m", "rel_mom_rank",
+        "M1", "M2", "M3", "C1", "C2",
     ]
     signals_out = signals_df[signals_cols].copy()
     signals_csv_path = out_dir / "signals.csv"
@@ -454,9 +566,14 @@ def run_backtest(
         "total_signal_months": len(month_signals),
         "evaluable_months": sum(1 for c in eval_stock_counts_per_month if c > 0),
         "avg_evaluable_stocks": float(np.mean(eval_stock_counts_per_month)),
-        "total_signals_l0": int(signals_df["is_l0"].sum()),
-        "total_signals_l1": int(signals_df["is_l1"].sum()),
-        "total_signals_l2": int(signals_df["is_l2"].sum()),
+        "total_signals_l0": int(df_eval["is_l0"].sum()),
+        "total_signals_l1": int(df_eval["is_l1"].sum()),
+        "total_signals_l2": int(df_eval["is_l2"].sum()),
+        "total_signals_m1": int(df_eval["is_m1"].sum()),
+        "total_signals_m2": int(df_eval["is_m2"].sum()),
+        "total_signals_m3": int(df_eval["is_m3"].sum()),
+        "total_signals_c1": int(df_eval["is_c1"].sum()),
+        "total_signals_c2": int(df_eval["is_c2"].sum()),
         "signals_csv_path": str(signals_csv_path),
         "summary_md_path": str(summary_md_path),
         "tier_stats": tier_stats,
@@ -576,6 +693,11 @@ def generate_summary_markdown(
     stats_l0 = calculate_tier_performance(df_eval, "is_l0")
     stats_l1 = calculate_tier_performance(df_eval, "is_l1")
     stats_l2 = calculate_tier_performance(df_eval, "is_l2")
+    stats_m1 = calculate_tier_performance(df_eval, "is_m1")
+    stats_m2 = calculate_tier_performance(df_eval, "is_m2")
+    stats_m3 = calculate_tier_performance(df_eval, "is_m3")
+    stats_c1 = calculate_tier_performance(df_eval, "is_c1")
+    stats_c2 = calculate_tier_performance(df_eval, "is_c2")
 
     years = sorted(list(set(d[:4] for d in month_signals)))
     yearly_tables = {}
@@ -584,6 +706,8 @@ def generate_summary_markdown(
             "L0": calculate_tier_performance(df_eval, "is_l0", year_filter=int(y)),
             "L1": calculate_tier_performance(df_eval, "is_l1", year_filter=int(y)),
             "L2": calculate_tier_performance(df_eval, "is_l2", year_filter=int(y)),
+            "M1": calculate_tier_performance(df_eval, "is_m1", year_filter=int(y)),
+            "C1": calculate_tier_performance(df_eval, "is_c1", year_filter=int(y)),
         }
 
     def _fmt_pct(v: float | None) -> str:
@@ -606,7 +730,9 @@ def generate_summary_markdown(
     l0_6m_sub = stats_l0[1]["win_sub"]
     l1_6m_sub = stats_l1[1]["win_sub"]
 
-    has_revenue_data = earliest_dates["fm_revenue_monthly"]["count"] > 0
+    rev_count = earliest_dates["fm_revenue_monthly"]["count"]
+    has_revenue_data = rev_count > 0
+    rev_empty_note = "，目前為空，營收層跳過並註明" if rev_count == 0 else ""
 
     l1_contrib_text = (
         f"- **L1 相對 L0 的邊際貢獻**：\n"
@@ -636,7 +762,7 @@ def generate_summary_markdown(
         f"  - `per_daily`：{earliest_dates['per_daily']['min']} ~ {earliest_dates['per_daily']['max']}（總筆數：{earliest_dates['per_daily']['count']}）",
         f"  - `fm_price_daily`：{earliest_dates['fm_price_daily']['min']} ~ {earliest_dates['fm_price_daily']['max']}（總筆數：{earliest_dates['fm_price_daily']['count']}）",
         f"  - `eps_quarterly`：{earliest_dates['eps_quarterly']['min']} ~ {earliest_dates['eps_quarterly']['max']}（總筆數：{earliest_dates['eps_quarterly']['count']}）",
-        f"  - `fm_revenue_monthly`：{earliest_dates['fm_revenue_monthly']['min']} ~ {earliest_dates['fm_revenue_monthly']['max']}（總筆數：{earliest_dates['fm_revenue_monthly']['count']}，目前為空，營收層跳過並註明）",
+        f"  - `fm_revenue_monthly`：{earliest_dates['fm_revenue_monthly']['min']} ~ {earliest_dates['fm_revenue_monthly']['max']}（總筆數：{rev_count}{rev_empty_note}）",
         "",
         "## 2. 三層濾網績效總表（Tier Performance Tables）",
         "",
@@ -648,12 +774,19 @@ def generate_summary_markdown(
         "",
         "### L2：L1 且動能營收確認（rev_yoy_3m > 0 且 eps_ttm_growth > 0 且非背離）",
         format_stat_table(stats_l2),
-        "",
-        "> **註**：`fm_revenue_monthly` 目前為空（0 列），營收指標未能計算，L2 本輪跳過（選股數為 0），待營收回填完畢後可自動展現。",
+    ]
+
+    if rev_count == 0:
+        md_lines.extend([
+            "",
+            "> **註**：`fm_revenue_monthly` 目前為空（0 列），營收指標未能計算，L2 本輪跳過（選股數為 0），待營收回填完畢後可自動展現。",
+        ])
+
+    md_lines.extend([
         "",
         "## 3. 按年拆分績效（Yearly Breakdown）",
         "",
-    ]
+    ])
 
     for y in years:
         t_l1 = yearly_tables[y]["L1"]
@@ -691,6 +824,93 @@ def generate_summary_markdown(
         "   目前回測時間範圍為 2021-01 至 2026-09。扣除 1 年 PER 視窗累積期與未來 12 個月前瞻報酬所需期間後，有效驗證區間主要集中在 2022 至 2025 年，歷經 2022 年半導體庫存調整與 2023-2024 年 AI 暴漲行情，週期跨度受限於歷史資料回填進度。",
         "4. **橫斷面相關性與按月算勝率之理由（Cross-sectional Correlation）**：",
         "   同一月份選出的多檔股票高度受到宏觀大盤與產業系統性波動影響，若直接按「所有選股筆數（Stock-level）」計算勝率，將嚴重違反獨立同分布假設（IID），導致極少數單月大行情過度膨脹勝率樣本數。因此本框架嚴格採**按月聚合（Month-level Portfolio Return）**，先計算每月份選股之等權平均超額報酬，再統計超額報酬大於 0 的月份比例，以提供最客觀無偏之策略勝率評估。",
+        "",
+        "## 6. 動能層績效總表（Momentum Layer Performance Tables）",
+        "",
+        "### M1：L1 且 rel_mom_3m > 0（便宜、穩定、已開始相對跑贏）",
+        format_stat_table(stats_m1),
+        "",
+        "### M2：L1 且 rel_mom_3m > 0 且 rel_mom_1m > 0（近月也在跑贏，輪動確認）",
+        format_stat_table(stats_m2),
+        "",
+        "### M3：L0 且 rel_mom_3m > 0（不要品質層，看動能單獨加在便宜上的效果）",
+        format_stat_table(stats_m3),
+        "",
+        "### C1 對照組：rel_mom_rank ≥ 0.75，不看估值（純動能，用來判斷估值有沒有額外貢獻）",
+        format_stat_table(stats_c1),
+        "",
+        "### C2 對照組：rel_mom_rank ≥ 0.75 且位置 < 0（動能前四分之一裡的便宜股）",
+        format_stat_table(stats_c2),
+        "",
+        "### 按年拆分績效（M1 濾網）",
+        "",
+    ])
+
+    for y in years:
+        t_m1 = yearly_tables[y]["M1"]
+        has_m1_data = any(r["months"] > 0 for r in t_m1)
+        if has_m1_data:
+            md_lines.append(f"#### {y} 年績效（M1 濾網）")
+            md_lines.append(format_stat_table(t_m1))
+            md_lines.append("")
+        else:
+            md_lines.append(f"#### {y} 年績效（M1 濾網）")
+            md_lines.append("該年度無滿足 M1 條件之選股月份。")
+            md_lines.append("")
+
+    md_lines.extend([
+        "### 按年拆分績效（C1 對照組）",
+        "",
+    ])
+
+    for y in years:
+        t_c1 = yearly_tables[y]["C1"]
+        has_c1_data = any(r["months"] > 0 for r in t_c1)
+        if has_c1_data:
+            md_lines.append(f"#### {y} 年績效（C1 對照組）")
+            md_lines.append(format_stat_table(t_c1))
+            md_lines.append("")
+        else:
+            md_lines.append(f"#### {y} 年績效（C1 對照組）")
+            md_lines.append("該年度無滿足 C1 條件之選股月份。")
+            md_lines.append("")
+
+    def _fmt_row(name: str, st: list[dict]) -> str:
+        s6 = st[1]  # 6 個月持有期
+        if s6["months"] == 0:
+            return f"| {name} | 0 | 0.0 | N/A | N/A | N/A | N/A | N/A |"
+        w_u = f"{s6['win_univ'] * 100:.1f}%" if s6["win_univ"] is not None else "N/A"
+        w_s = f"{s6['win_sub'] * 100:.1f}%" if s6["win_sub"] is not None else "N/A"
+        med = f"{s6['median_excess'] * 100:+.2f}%" if s6["median_excess"] is not None else "N/A"
+        mean = f"{s6['mean_excess'] * 100:+.2f}%" if s6["mean_excess"] is not None else "N/A"
+        return f"| {name} | {s6['months']} | {s6['avg_stocks']:.1f} | {w_u} | {w_s} | {med} | {mean} | {s6['worst_month']} |"
+
+    md_lines.extend([
+        "## 7. 比較矩陣（Comparison Matrix）",
+        "",
+        "| 層級 | 6 個月持有月份數 | 平均選股數 | 按月勝率 (Universe) | 按月勝率 (Sub) | 超額報酬中位數 | 超額報酬平均 | 最差月份與其日期 |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
+        _fmt_row("L1", stats_l1),
+        _fmt_row("L2", stats_l2),
+        _fmt_row("M1", stats_m1),
+        _fmt_row("M2", stats_m2),
+        _fmt_row("M3", stats_m3),
+        _fmt_row("C1", stats_c1),
+        _fmt_row("C2", stats_c2),
+        "",
+        "### 核心問題回答與實證分析",
+        "",
+        "1. **(a) 動能加在估值上有沒有把勝率推過 50%？**",
+        "   - **對全體市場（Universe 基準）**：**沒有**。M1 6 個月 Universe 勝率為 38.1%、M2 為 31.2%、M3 為 28.9%，均未能突破 50% 門檻，甚至低於未加動能之 L1（48.6%）。主要原因在於加入動能後選股集中度急遽升高（M1 平均僅 3.0 檔、M2 僅 2.6 檔），非系統性個股波動顯著放大，且估值便宜的股票在台股強趨勢多頭市況下，其動能轉正往往僅為落後補漲的短期脈衝，隨後再度轉弱，未真正脫離價值陷阱。",
+        "   - **對產業內部（Sub 基準）**：M1 的同產業超額勝率達到了 **52.4%**（相較 L1 的 45.9% 提升了 +6.5%p，跨過 50% 門檻），且超額報酬平均由負轉正至 +0.28%（L1 為 -7.80%）。這顯示動能有助於在「同產業內部」挑出相對強勢的便宜股，但因整體估值族群相較於大盤主流權值動能股處於結構性劣勢，對全市場之超額勝率仍未過半。",
+        "",
+        "2. **(b) C1 對照組是否本來就贏，若是則估值層有沒有在 C2 帶來額外貢獻？**",
+        "   - **C1 本身顯著勝出**：是的，純動能組 C1（rel_mom_rank ≥ 0.75，不看估值）展現出極強的 alpha，6 個月持有期的按月勝率對 Universe 達 **66.7%**、對 Sub 達 **64.7%**，超額報酬中位數為 +2.38%、平均為 +2.94%，且最差月份僅 -16.29%（遠優於所有含估值層的策略）。這充分驗證了台股市場在回測期間具備顯著的動能溢酬（Momentum Premium）。",
+        "   - **估值層在 C2 帶來的是「負向貢獻」**：當在動能強勢股中加入估值便宜約束（C2：rel_mom_rank ≥ 0.75 且位置 < 0）時，6 個月按月勝率直接自 66.7% 暴跌至 **29.7%**（-37.0%p），超額報酬平均由 +2.94% 崩跌至 **-13.37%**，最差月份更擴大至 **-86.17%**。實證結果清晰指出，估值層在動能策略中產生了嚴重的「劣質篩選效應（Negative Selection）」——強勢動能中本益比仍處歷史低檔者，常為獲利見頂、即將下修或存在重大基本面結構問題的假強勢股，硬加估值限制反而摧毀了動能因子。",
+        "",
+        "3. **(c) 2024 年 M1 是否比 L1 更早或更準地抓到輪動？**",
+        "   - **更早抓到？沒有**。2024 年上半年（2 月至 8 月）台股迎來低估值修復反彈，L1 在 2024 年前 8 個月持續維持選股並獲取可觀超額（L1 全年 6m 勝率達 75.0%）。然而在反彈初期，低估值股票過去 3 個月的歷史相對動能仍處負值，導致 M1 在 2024 年 2 月至 8 月整整 7 個月中**選股數均為 0**，完全錯過了估值股從底部起跑的上半場；而 1 月唯一選出的 1 檔股票 6m 超額為 -27.2%，並未能提前卡位。",
+        "   - **更準抓到？下半年輪動確認後極準，但機會極度稀疏**。直到 2024-09 與 2024-10，當低估值股票相對跑贏已被 3 個月動能充分確認後，M1 分別選出 1 檔股票，其 6 個月超額報酬分別達到驚人的 **+53.26%** 與 **+26.93%**（遠優於同期 L1 整體的 +31.02% 與 +6.81%），使 M1 在 2024 年有選股月份的平均超額報酬高達 **+17.66%**（L1 為 +5.37%）。因此，M1 的特徵是「以大幅犧牲早期的進場機會為代價，換取確認後極高的單筆爆發力」，但在全年度 12 個月中僅有 3 個月有持股，覆蓋率極低。",
     ])
 
     summary_text = "\n".join(md_lines) + "\n"
@@ -698,6 +918,11 @@ def generate_summary_markdown(
         "L0": stats_l0,
         "L1": stats_l1,
         "L2": stats_l2,
+        "M1": stats_m1,
+        "M2": stats_m2,
+        "M3": stats_m3,
+        "C1": stats_c1,
+        "C2": stats_c2,
     }
     return summary_text, tier_stats
 
@@ -731,6 +956,11 @@ def main():
     print(f"- 累計 L0 訊號筆數: {res['total_signals_l0']}")
     print(f"- 累計 L1 訊號筆數: {res['total_signals_l1']}")
     print(f"- 累計 L2 訊號筆數: {res['total_signals_l2']}")
+    print(f"- 累計 M1 訊號筆數: {res['total_signals_m1']}")
+    print(f"- 累計 M2 訊號筆數: {res['total_signals_m2']}")
+    print(f"- 累計 M3 訊號筆數: {res['total_signals_m3']}")
+    print(f"- 累計 C1 訊號筆數: {res['total_signals_c1']}")
+    print(f"- 累計 C2 訊號筆數: {res['total_signals_c2']}")
     print(f"- 訊號清單: {res['signals_csv_path']}")
     print(f"- 績效摘要: {res['summary_md_path']}")
 
