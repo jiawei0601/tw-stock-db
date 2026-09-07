@@ -16,3 +16,4 @@ data/*.log
 
 # API 金鑰（勿 commit）
 .env
+valuation_fetch.log

@@ -1087,3 +1087,5 @@
   - **建議更新頻率**：每季（產業鏈成分股變動不快），手動重跑
     `python build_sub_industry.py` 即可；未排入 `refresh_daily.py` 每日鏈。
   - 怎麼重跑：`python build_sub_industry.py` → `python build_valuation.py --screen`。
+
+- 2026-09-07 11:30 交接狀態：`tests/test_fundamentals_content.py` 3 紅（monthly_revenue 與 institutional_flow 各有 2867/4130/5371 三檔孤兒列，因 build_db.py 重建 stocks 表後這三檔已下市；freshness 0.938<0.95）。皆為資料時滯，非估值/子產業程式問題，預期 18:30 `refresh_daily.py` 排程跑完後恢復；若未恢復需在 build_db.py 補孤兒列清理。repo 根目錄有一個 0 byte 的 `tw_stocks.db` 雜檔（未追蹤），可手動刪除。
