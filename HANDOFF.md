@@ -1,5 +1,15 @@
 # HANDOFF
 
+## 進行中：2020 起無前視偏誤動能回測（Codex，2026-09-08）
+
+- 使用者要求用 FinMind 公開 API 補資料；固定 12−1 動能前 25%、T+1 建倉、持有 6／12 月。契約：`docs/tasks/momentum-2020-pit.md`；查核報告：`analysis/momentum-2020-data-audit-2026-09-08.md`。
+- 已完成原 DB 與程式查核、API 實測、`fetch_momentum_pit.py` 可續傳下載器；6 個新 unittest 綠、diff check 綠，未重跑舊全專案測試。
+- **正式回測未完成、無偏誤尚未認證。** 原行情最早 2021，原下市表 133 筆只有 1 個代碼有回測行情；不可沿用 2026 存活者母體回推 2020。
+- 已启动隱藏背景下載程序，PID 及日誌在 `data/momentum_pit/worker.pid`／`worker.log`／`worker-error.log`；先檢查程序仍在與 `status.json`，不要重複開 writer。2,162 候選 × 4 資料集，約 8,655 次請求、17 小時以上；每 7 秒一次，API 錯誤即停、重跑續傳。資料未納入 git，原 DB 未改。
+- 完成下載仍需歷史股票身分、股利、減資／分割、下市結算核對及訊號未來資料擾動測試；下載器不會自動算報酬。PriceAdj 公開權限不足，不能假裝已含息。`TaiwanStockInfo.date` 不是上市日；空股利表不代表沒有股利。
+- 開工即有他人變更：`backtest/t1_group_events.csv`、三個 `backtest/stop_rule_*.csv`、根目錄 `tw_stock.db`。保留原狀，未 pull／未提交這些檔案；本輪只提交自己的下載器、測試、文件及忽略规则，不宣稱整棵 tree 乾淨。
+
+
 > 兩個 agent 交接的唯一現況真相。離開前更新，接手前先讀。歷史輪次（第一輪～第十五輪，
 > 含當時的進行中/下一步/關鍵決策/雷區/怎麼跑）已搬到 `docs/handoff-archive.md`，
 > 一字不丟，只是不塞在這裡逼新 session 先讀 120KB。

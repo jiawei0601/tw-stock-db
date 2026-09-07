@@ -10,6 +10,7 @@ __pycache__/
 # 重建方式：依序跑 build_db.py 起的各 build 腳本（見 README「每日更新」與 AGENTS.md）。
 data/tw_stocks.db
 data/*.db
+data/momentum_pit/
 
 # refresh log（腳本自寫 + 排程 stdout 捕捉），純執行紀錄非資料本體
 data/*.log
