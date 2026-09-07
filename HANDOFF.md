@@ -1016,3 +1016,5 @@
 - **修法**：排程改雙觸發器＝平日 18:30 ＋ **登入後延遲 30 分鐘補跑**（MultipleInstances=IgnoreNew 防併發；腳本本身增量冪等，重複跑無害、無變更時 publish 自動跳過）。
 - 同日起動作改經 `C:\CLAUDE\tools\run-hidden.vbs` 隱藏視窗執行（全機排程統一作法），原始命令對照表在 `C:\CLAUDE\tools\hide-scheduled-tasks.ps1`。
 - **驗證方式**：看 `data/refresh.log` 是否有當日「共 12 步，失敗 0 步」；DB 口徑抽查 `SELECT MAX(date) FROM daily_prices`。
+
+- 2026-09-07 委員會評估四檔半導體低估候選，見 `analysis/semiconductor-committee-2026-09-07.md`；待辦：sub 子產業 dict 覆蓋不足（147/190 落「其他」）、篩選加近 3 月營收 YoY 交叉欄位。
