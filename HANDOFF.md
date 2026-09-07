@@ -1219,3 +1219,5 @@
 - 2026-09-07 回測框架 `backtest_valuation.py`（agy 實作、Claude 審查 approve，8 測試綠）：point-in-time 月頻回測，輸出 backtest/。首輪結果 L0/L1 在 2022–2026 相對等權 universe 為負超額（2024 例外），L2 待 fm_revenue_monthly 回填後重跑 `python backtest_valuation.py --out backtest/`。審查紀錄見 docs/tasks/reports/。
 
 - 2026-09-07 回填修正：目標日非交易日導致 done 永遠判 False、每輪重抓空 gap 燒額度（218 次空請求）。改 `_covers_target` 容忍（日 10 天／季報 100 天／月同月）＋ `empty_gap:<start>` 記錄後不再重抓。修正前 remaining 顯示 1024 是假的，實際剩 464（其中多數是上市較晚的股票，第一輪確認為空後即不再計）。
+
+- 2026-09-07 15:00 月營收回填完成（254 檔、219 檔回到 2020-01），重跑回測：L2（加營收同向）相對 L1 無邊際貢獻（6 個月按月勝率 43% vs 49%、超額中位 -6.1% vs -5.3%）。結論：篩選器在 2022–2026 只有描述力沒有預測力，當清單用、不當買訊。summary.md 內「fm_revenue_monthly 目前為空」註腳是 agy 寫死的文字，待清。
