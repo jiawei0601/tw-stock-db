@@ -127,9 +127,11 @@ def test_price_asof_none_when_no_data_before_asof():
     assert bv._price_asof(rows, "2026-09-04") is None
 
 
-def test_split_via_per_jump_detects_jump_without_eps_change():
+def test_per_jump_flag_detects_jump_without_eps_change():
     """per_daily 本身跳動 >40%，附近沒有 eps_quarterly 的 quarter_end 可解釋，
-    視為疑似分割（第二道保險，不依賴價格資料是否完整）。"""
+    標記 per_jump_flag=True（純觀察用途，【2026-09-07 撤回】不再拿來當 split_flag
+    判準——FinMind 每季套用新 EPS 時 PER 本來就會跳，此排除條件實測擋不住，見
+    HANDOFF.md 撤回紀錄）。"""
     per_rows = [
         ("2026-08-31", 25.0),
         ("2026-09-01", 25.01),
@@ -139,9 +141,9 @@ def test_split_via_per_jump_detects_jump_without_eps_change():
     assert bv._detect_split_via_per_jump(per_rows, eps_quarter_ends=["2026-06-30"]) is True
 
 
-def test_split_via_per_jump_false_when_near_quarter_end():
+def test_per_jump_flag_false_when_near_quarter_end():
     """PER 跳動剛好發生在財報認列（quarter_end 附近 10 天內），視為正常 EPS 波動，
-    不誤判為分割。"""
+    per_jump_flag=False。"""
     per_rows = [
         ("2026-08-10", 25.0),
         ("2026-08-12", 8.5),
@@ -149,13 +151,13 @@ def test_split_via_per_jump_false_when_near_quarter_end():
     assert bv._detect_split_via_per_jump(per_rows, eps_quarter_ends=["2026-08-14"]) is False
 
 
-def test_split_via_per_jump_false_for_normal_series():
+def test_per_jump_flag_false_for_normal_series():
     per_rows = [("2026-08-31", 20.0), ("2026-09-01", 20.5), ("2026-09-02", 19.8)]
     assert bv._detect_split_via_per_jump(per_rows, eps_quarter_ends=[]) is False
 
 
 def test_band_ok_false_when_split_flag_true():
-    """split_flag=True 時無論其他指標多漂亮，band_ok 一律 False（本輪新增的緯穎盲點修正）。"""
+    """split_flag=True 時無論其他指標多漂亮，band_ok 一律 False（緯穎盲點修正）。"""
     eps_cv = 0.1
     loss_q = 0
     n_per = 400
@@ -163,6 +165,19 @@ def test_band_ok_false_when_split_flag_true():
     split_flag = True
     band_ok = (eps_cv < 0.5) and (loss_q == 0) and (n_per >= 300) and (n_eps_q == 8) and not split_flag
     assert band_ok is False
+
+
+def test_band_ok_unaffected_by_per_jump_flag():
+    """【2026-09-07】per_jump_flag=True 但 split_flag=False 時，band_ok 不受影響——
+    per_jump_flag 只是標記欄位，不進入 band_ok 判斷式（撤回誤判規則的核心修正）。"""
+    eps_cv = 0.1
+    loss_q = 0
+    n_per = 400
+    n_eps_q = 8
+    split_flag = False
+    per_jump_flag = True  # noqa: F841  -- 刻意不用在 band_ok 判斷式中，證明不影響
+    band_ok = (eps_cv < 0.5) and (loss_q == 0) and (n_per >= 300) and (n_eps_q == 8) and not split_flag
+    assert band_ok is True
 
 
 # ---- 【2026-09-07】營收 vs EPS 背離四欄 ----

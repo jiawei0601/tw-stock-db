@@ -121,6 +121,10 @@ CREATE TABLE IF NOT EXISTS valuation_screen (
                                                    -- rev_yoy_3m<-0.10 且 eps_ttm_growth>0.20
     price_date       TEXT,              -- 【2026-09-07】price 實際取自哪一天（可能早於
                                          -- run_date，也可能是 daily_prices fallback）
+    per_jump_flag    INTEGER NOT NULL DEFAULT 0,  -- 【2026-09-07】per_daily 單日 PER 跳動
+                                         -- >40% 且附近無 eps_quarterly 同期跳變可解釋的標記，
+                                         -- 純觀察用途，不影響 band_ok / not_ok_reason（見
+                                         -- HANDOFF.md 撤回紀錄：曾誤把此當 split_flag 判準）
     PRIMARY KEY (run_date, stock_id, universe)
 );
 """
@@ -148,6 +152,7 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         "ALTER TABLE valuation_screen ADD COLUMN rev_yoy_ytd REAL",
         "ALTER TABLE valuation_screen ADD COLUMN rev_eps_diverge INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE valuation_screen ADD COLUMN price_date TEXT",
+        "ALTER TABLE valuation_screen ADD COLUMN per_jump_flag INTEGER NOT NULL DEFAULT 0",
     ):
         try:
             conn.execute(col_sql)
@@ -633,15 +638,18 @@ def _screen_one(conn: sqlite3.Connection, sid: str, name: str, universe: str, su
     else:
         cur_price, price_date = None, None
 
+    # 【2026-09-07 撤回】split_flag 只由價格序列判定（fm_price_daily，缺才 fallback
+    # daily_prices）。per_daily 單日 PER 跳動 >40% 曾被當成第二道分割保險，但 FinMind
+    # 每季套用新一期 EPS 時 PER 本來就會跳（尤其低 EPS 小型股），「附近無 eps_quarterly
+    # 同期跳變」的排除條件實際上沒擋住，273 列裡誤判到 139 列 split_flag=1。改成獨立
+    # 欄位 per_jump_flag，只做標記、不影響 band_ok，見 HANDOFF.md 撤回紀錄。
     split_flag = _detect_split_flag(price_rows)
-    if not split_flag:
-        # 第二道保險：per_daily 本身的日對日 PER 跳動，不依賴價格資料是否完整。
-        split_flag = _detect_split_via_per_jump(
-            [(d, per) for d, per, _, _ in pers],
-            [q for q, _ in conn.execute(
-                "SELECT quarter_end, eps FROM eps_quarterly WHERE stock_id = ? AND eps IS NOT NULL", (sid,)
-            ).fetchall()],
-        )
+    per_jump_flag = _detect_split_via_per_jump(
+        [(d, per) for d, per, _, _ in pers],
+        [q for q, _ in conn.execute(
+            "SELECT quarter_end, eps FROM eps_quarterly WHERE stock_id = ? AND eps IS NOT NULL", (sid,)
+        ).fetchall()],
+    )
 
     eps_ttm = (cur_price / cur_per) if (cur_price is not None and cur_per) else None
 
@@ -711,7 +719,7 @@ def _screen_one(conn: sqlite3.Connection, sid: str, name: str, universe: str, su
         "per_points": n_per, "eps_quarters": n_eps_q,
         "eps_cv": None if eps_cv == float("inf") else eps_cv,
         "loss_q": loss_q, "eps_ttm_growth": eps_ttm_growth,
-        "split_flag": split_flag, "band_ok": band_ok,
+        "split_flag": split_flag, "per_jump_flag": per_jump_flag, "band_ok": band_ok,
         "not_ok_reason": "；".join(reasons) if reasons else None,
         "category": category, "last_date": last_date, "sub_multi": sub_multi,
         "price_date": price_date,
@@ -747,8 +755,9 @@ def screen(conn: sqlite3.Connection) -> dict:
                 per_p25, per_p50, per_p75, position, fair_low, fair_high,
                 pbr, pbr_p25, pbr_p75, dividend_yield, per_points, eps_quarters,
                 eps_cv, loss_q, eps_ttm_growth, split_flag, band_ok, not_ok_reason, category,
-                sub_multi, rev_ym_latest, rev_yoy_3m, rev_yoy_ytd, rev_eps_diverge, price_date
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                sub_multi, rev_ym_latest, rev_yoy_3m, rev_yoy_ytd, rev_eps_diverge, price_date,
+                per_jump_flag
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_date, r["stock_id"], r["name"], r["universe"], r["sub"], r["price"], r["per"],
@@ -757,7 +766,7 @@ def screen(conn: sqlite3.Connection) -> dict:
                 r["eps_cv"], r["loss_q"], r["eps_ttm_growth"], int(r["split_flag"]), int(r["band_ok"]),
                 r["not_ok_reason"], r["category"], int(r["sub_multi"]),
                 r["rev_ym_latest"], r["rev_yoy_3m"], r["rev_yoy_ytd"], int(r["rev_eps_diverge"]),
-                r["price_date"],
+                r["price_date"], int(r["per_jump_flag"]),
             ),
         )
     conn.commit()

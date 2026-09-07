@@ -1170,3 +1170,40 @@
     走的是 `build_valuation.py` 自己的 cache/fetch 流程，不受 `refresh_daily.py`
     管，兩條鏈進度不同步是本次踩雷的根本背景，需要排查 `TwStockDbDaily` 排程近期
     執行紀錄 `data/refresh.log`）。
+
+- **2026-09-07（下午）撤回「PER 單日跳動視為分割」規則，改成獨立 `per_jump_flag`**：
+  上一輪加的 `_detect_split_via_per_jump`（per_daily 日對日 PER 跳動 >40% 且附近無
+  `eps_quarterly` 同期跳變可解釋 → 視為疑似分割）造成大量誤判：09-04 run_date 273
+  列中 139 列 `split_flag=1`。根因是 FinMind 每季套用新一期 EPS 時 PER 本來就會跳
+  （尤其低 EPS 小型股跳動幅度更大），「附近無 quarter_end」這個排除條件實際上完全
+  沒擋住——quarter_end 只是財報「所屬季度」，跟 FinMind 真正把新 EPS 寫進 per_daily
+  的日期經常相差超過 ±10 天。
+  - `split_flag` 現在**只由價格序列**（`fm_price_daily`，缺該檔資料才 fallback
+    `daily_prices`）判定，即 `_detect_split_flag`（近 60 交易日內任一日價格跳動
+    >40%）；`_detect_split_via_per_jump` 的結果改寫入新欄位 `per_jump_flag`（冪等
+    `ALTER TABLE`，`INTEGER NOT NULL DEFAULT 0`），純觀察用途，**不進入 `band_ok`
+    判斷式、不寫進 `not_ok_reason`**。
+  - 順便補上 `fetch_missing()` 一直沒有的 `TaiwanStockPrice` 抓取分支（上一輪已修，
+    本輪確認生效）：本次 `--fetch` 156 檔補抓後，`fm_price_daily` 覆蓋從 96 檔提升
+    到 252 檔（screen universe 237 檔中僅剩 2456 奇力新、5305 敦南兩檔仍缺，沒有
+    fallback 到 `daily_prices` 的列——這兩檔在最終 273 列輸出中直接因缺價格被排除，
+    不會混進誤判區間）。
+  - **驗證（run_date=2026-09-04，273 列）**：`split_flag=1` 只剩 1 檔——6669 緯穎
+    （price_date=2026-09-04，band_ok=0，維持修復狀態不變）；`per_jump_flag=1` 有
+    139 檔（跟撤回前的 `split_flag=1` 數字一致，證明新欄位確實接住了原本誤判的
+    PER 跳動股，只是改為不影響 band_ok）；`price_date` 帶 `(daily_prices_fallback)`
+    標記的列數為 0。
+  - `ai_chain`／`semiconductor` 兩個 universe「低於合理區間且 `band_ok=1`」分別
+    5 檔／15 檔（技嘉/廣達/緯創/智易/神達；義隆/原相/力旺/新應材/精拓科/凌陽創新/
+    祥碩/晶焱/矽力*-KY/宏觀/威鋒電子/家碩/力領科技/明遠精密/千附）——比撤回前
+    （誤判時的 4／11，緯穎因 split_flag 被排除但一堆 PER 跳動股被誤剔除）多出不少
+    檔，因為之前被 `_detect_split_via_per_jump` 誤判成分割、`band_ok` 被強制清 0
+    的股票這次恢復正常判斷。
+  - 測試：`tests/test_valuation.py` 的 PER 跳動三個測試改名
+    `test_per_jump_flag_*`（函式本身 `_detect_split_via_per_jump` 不變，只是測試
+    意圖與註解改成「純標記，不當 split 判準」），新增
+    `test_band_ok_unaffected_by_per_jump_flag` 明確驗證 `per_jump_flag=True` 不影響
+    `band_ok`。`python -m pytest tests/test_valuation.py tests/test_sub_industry.py -q`
+    28 個測試全綠。
+  - `fetch_done.flag`（本次補跑 `--fetch` 用的完工旗標）已刪除並補進
+    `.gitignore`，避免之後同類背景任務的旗標檔誤入版控。
