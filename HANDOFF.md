@@ -1,5 +1,11 @@
 # HANDOFF
 
+## 最新交易紀錄HTML（Codex，2026-09-08）
+
+- `python render_momentum_trades.py` 產生5%淨值動能版本的離線HTML，路徑 `backtest/momentum_weekly_hermes_equity_momentum_exit_weight0.05/交易紀錄.html`；860筆平倉、17檔期末持股，含搜尋／年度原因盈虧篩選／排序／分頁／CSV匯出／列印／淨值曲線。模板 `docs/templates/momentum-trades.html`。
+- 股名由現有FinMind資訊讀取；逐筆損益與期末市值／現金核對通過，輸出可重現。未更動策略或他人的檔案。
+
+
 ## 最新：動能出場＋新倉淨值5%（Codex，2026-09-08）
 
 - 使用者先要求動能進出場、不限檔數、按淨值，接著明確每檔5%。已跑 `python weekly_hermes_momentum.py --equity-allocation --momentum-exit --position-weight 0.05`。週三選股、月底動能退出＋每日10%淨停損；無Hermes分批與90天期限。
