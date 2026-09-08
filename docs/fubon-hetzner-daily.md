@@ -4,7 +4,7 @@
 
 使用者授權把券商庫存接入 Hetzner 每日持倉監控。預定更新既有台股日報 `ad2b97bcefc8`（平日14:00，Asia/Taipei），不新增重複排程、不改美股核心倉或獨立50萬元動能30策略。
 
-目前環境與程式已部署，尚未啟用日報串接：API Key 驗證被富邦拒絕，回應「Login Error, API認證,APIKEY尚未申請」。已停止重試，等待使用者確認輸入的是完整 Secret Key／重新取得有效Key。不得把已保存設定當登入成功。
+2026-09-08 已啟用：使用者確認先前Key貼錯，重新本機輸入後Hetzner真實查詢成功（1帳戶、12檔正餘額，當日庫存）。既有job已加前置腳本、保留平日14:00及原收件人，名稱改「台股持倉日報（富邦庫存・14:00）」。核對下一次執行2026-09-09 14:00+08:00。前置腳本實測成功，尚未手動觸發整份日報／宣稱首個排程TG已交付。
 
 ## 遠端環境
 
@@ -31,6 +31,6 @@
 
 ## 驗證
 
-37項相關離線測試通過（含14項每日庫存fakeSDK測試）。Linux2.3.0 SDK可載入。真實APIKey驗證未通過，所以日報未接線。
+38項相關離線測試通過（含14項每日庫存fakeSDK測試及SSH UTF-8回應regression）。Linux2.3.0 SDK可載入；真實API Key庫存查詢與Hermes前置腳本均成功。原設定GUI遇中文stdout解碼造成AttributeError但遠端已成功，已明示encoding=utf-8修正。
 
 來源：[API Key登入](https://www.fbs.com.tw/TradeAPI/docs/trading/library/python/login/loginAPIKey/)、[SDK下載](https://www.fbs.com.tw/TradeAPI/docs/download/download-sdk/)。

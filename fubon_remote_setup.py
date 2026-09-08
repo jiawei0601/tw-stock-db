@@ -23,13 +23,13 @@ def setup(user, api_key, cert_path, cert_password):
     payload = dict(personal_id=user, api_key=api_key, cert_password=cert_password,
                    certificate_base64=base64.b64encode(Path(cert_path).read_bytes()).decode('ascii'))
     result = subprocess.run(SSH + ['python3 /home/chang/fubon-monitor/fubon_install_credentials.py'],
-                            input=json.dumps(payload), text=True, capture_output=True, timeout=40,
+                            input=json.dumps(payload), text=True, encoding='utf-8', capture_output=True, timeout=40,
                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     payload.clear()
     if result.returncode or result.stdout.strip() != 'credentials_installed':
         raise ValueError('remote_install_failed')
     result = subprocess.run(SSH + ['/home/chang/fubon-monitor/.venv/bin/python /home/chang/fubon-monitor/fubon_daily_inventory.py'],
-                            text=True, capture_output=True, timeout=110,
+                            text=True, encoding='utf-8', capture_output=True, timeout=110,
                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     if result.returncode or not result.stdout.startswith('【富邦券商庫存查詢成功】'):
         return dict(status='remote_validation_failed', credentials_installed=True)

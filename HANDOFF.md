@@ -1,5 +1,13 @@
 # HANDOFF
 
+## 最新：Hetzner每日富邦庫存已啟用（Codex，2026-09-08）
+
+- 使用者確認先前API Key貼錯，重新本機輸入後，Hetzner真實API Key登入與庫存查詢成功、已登出；再次測試Hermes前置腳本成功，1個證券帳戶、12檔正餘額、庫存日2026-09-08。
+- 已執行 `fubon_attach_daily.py`，既有job `ad2b97bcefc8`名稱改為「台股持倉日報（富邦庫存・14:00）」、script=fubon-inventory-preflight.py、enabled=true、agent模式，保留原排程及收件人；已核對next_run=2026-09-09 14:00+08:00。未手動觸發整份TG日報；首個排程交付尚待實際執行。
+- 券商為股數來源、Notion為規則／成本備註來源，差異不猜；失敗告警不沿用舊股數；不因訊號將Notion改已出清／MA已賣。不改50萬元策略或其他job。
+- 本機設定視窗曾顯示AttributeError，原因為SSH中文stdout未明示UTF-8；遠端其實已成功。已修正兩個subprocess encoding並補regression，38項相關測試綠。本機status已按遠端證據更正，不需使用者重輸Key。
+- 最新部署文件 `docs/fubon-hetzner-daily.md`。下方待Key修正段落屬歷史，已由本節取代。前次commit4f2be43，交接者Codex。
+
 ## 最新：Hetzner每日庫存接線待API Key修正（Codex，2026-09-08）
 
 - 使用者授權Hetzner每日持倉監控自動抓券商庫存。獨立Linux Python3.12+Neo2.3.0已裝 `/home/chang/fubon-monitor`；唯讀runner、SSH秘密接收與前置script已部署，37項測試綠。詳見 `docs/fubon-hetzner-daily.md`、`docs/tasks/fubon-daily-inventory-contract.md`。
