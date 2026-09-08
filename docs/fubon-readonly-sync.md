@@ -2,6 +2,8 @@
 
 使用者確認富邦帳戶有其他持股，先分開對帳。現階段是本機券商快照，不是策略入帳或無人值守同步。
 
+2026-09-08 真實查詢已完成且登出：1個證券帳戶、12筆庫存、23筆成交，查詢區間2026-08-10～2026-09-08。庫存日期9/8，12檔均有正餘額，其中4檔僅零股；最新成交日期9/2。個股及成交內容僅保存在 ignored 本機檔案，不加入 repo。報表能取得真實資料，仍需使用者核對 App 完整性及策略歸屬。22項相關離線測試通過。
+
 ## 操作
 
 以 `C:\Users\chang\AppData\Local\FubonApiCheck\Scripts\pythonw.exe` 執行 repo 的 `fubon_readonly_gui.py --cert-path <新憑證路徑>`。密碼在 Tk 本機視窗輸入；登入一次後查詢所有 account_type=stock 的帳戶並登出。期貨帳戶跳過。SDK 日誌工作目錄在 `live_data/fubon/sdk-runtime/`，不要加入版本控制或傳 Telegram。
