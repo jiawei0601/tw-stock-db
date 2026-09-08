@@ -56,4 +56,6 @@ backtest/momentum_weekly_hermes_equity_momentum_exit_weight*/
 backtest/momentum_weekly_hermes_equity_momentum_exit_weight*_peak*/
 
 live_data/
+# 富邦 SDK 執行日誌可能含帳戶資訊
+/log/
 codex-*.json

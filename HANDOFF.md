@@ -1,5 +1,14 @@
 # HANDOFF
 
+## 最新：富邦唯讀對帳程式完成，等待真實查詢（Codex，2026-09-08）
+
+- 使用者要求繼續券商同步，明確確認「有其他持股，先分開對帳」。因此所有券商成交待分類、費稅未知，不推定為策略持股，不改 50 萬策略帳本或遠端系統。
+- 新增 `fubon_readonly.py`（唯讀核心）、`fubon_readonly_gui.py`（本機一次性登入與登出）、`fubon_readonly_report.py`（離線 HTML）、兩份測試。合約 `docs/tasks/fubon-readonly-contract.md`，操作與後續 `docs/fubon-readonly-sync.md`。
+- GUI 已用獨立 Neo2.3.0 環境啟動且預填新 p12；等待使用者安全輸入。接手讀 `live_data/fubon/latest-status.json`：成功時含 snapshot_path/report_path。目前不能宣稱真實成交／庫存查詢完成。所有快照在本機 ignored live_data/fubon；舊 log/ 已加 gitignore，SDK 新執行日誌置於該目錄內。
+- 查詢僅 inventories + filled_history、僅證券帳戶、最多30日；整股/零股分列、失敗明示partial、費稅null。無人值守登入／自動策略入帳／Hetzner 同步尚未實作，需要真實資料與逐筆歸屬、費稅對帳後續合約。
+- 驗收：`python -m pytest tests/test_fubon_readonly.py tests/test_fubon_readonly_gui.py tests/test_fubon_login_check.py tests/test_live_momentum.py -q` = 22 passed；獨立 Python3.10 py_compile 成功。Spark 子代理不可用，改 Sol 負責報表/tests，主代理整合審查並修正未知零股顯示。
+- 前次 commit 5779082；其他 agent 未提交回測／TWSE抽驗檔不納入。本輪只提交自己修改。
+
 ## 最新：富邦本機登入驗證成功（Codex，2026-09-08）
 
 - 使用者回報成功，已核對 `live_data/fubon-login-check.json`：2026-09-08 23:18:42 台北時間，`login_success=true`、`pfx_decrypted=true`、`certificate_reader=python`、`accounts_returned=2`、`logout_completed=true`。
