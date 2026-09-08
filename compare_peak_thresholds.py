@@ -5,9 +5,9 @@ from pathlib import Path
 from dynamic_momentum import metrics
 
 
-def compare():
+def compare(thresholds=(.15,.20,.25,.30)):
     results=[];reference=None
-    for threshold in (.15,.20,.25,.30):
+    for threshold in thresholds:
         root=Path(f'backtest/momentum_weekly_hermes_equity_momentum_exit_weight0.05_peak{threshold:g}_diagnostic')
         summary=json.loads((root/'result.json').read_text(encoding='utf-8'))
         options={k:v for k,v in summary['exit_options'].items() if k!='peak_stop'}
@@ -41,7 +41,7 @@ def compare():
         results.append(dict(threshold=threshold,ending_equity=stats['ending_equity'],**m,
                             calmar=m['cagr']/abs(m['max_drawdown']),trades=stats['closed_roundtrips'],
                             win_rate=stats['win_rate'],holding_days=stats['mean_holding_days'],
-                            yearly=stats['yearly'],slices=slices))
+                            yearly=stats['yearly'],slices=slices,exit_reasons=stats['exit_legs_by_reason']))
     print(json.dumps(results,ensure_ascii=False,indent=2))
     return results
 
