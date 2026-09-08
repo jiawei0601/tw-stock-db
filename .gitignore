@@ -38,3 +38,5 @@ agy-validity-2.log
 backtest/corporate_action_candidates.csv
 
 backtest/momentum_dynamic/
+
+backtest/momentum_dynamic_fixed10/

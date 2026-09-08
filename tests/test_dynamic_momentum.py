@@ -73,3 +73,39 @@ def test_split_preserves_nav_and_realized_return():
     nav,trades,orders,held,pending=simulate(prices,{('A',days[1]):2},days,tables)
     assert abs(nav[0]['nav_stale']-nav[1]['nav_stale'])<1e-12
     assert abs(trades[0]['return_net']-(.997/1.003-1))<1e-12
+
+
+def test_fixed_tickets_max_positions_and_priority():
+    days=['2020-01-02']
+    prices={str(i):{days[0]:dict(open=100,close=100,Trading_Volume=1)} for i in range(12)}
+    tables={'2019-11-29':{s:row(.01) for s in prices},'2019-12-31':{s:row(.1+int(s)/100) for s in prices}}
+    nav,trades,orders,held,pending=simulate(prices,{},days,tables,initial_capital=1_000_000,ticket=100_000,max_positions=10)
+    assert len(held)==10 and set(held)=={str(i) for i in range(2,12)}
+    assert all(p['cost']==100_000 for p in held.values()) and nav[-1]['cash']==0
+
+
+def test_insufficient_cash_does_not_create_smaller_ticket():
+    days=['2020-01-02']
+    prices={'A':{days[0]:dict(open=100,close=100,Trading_Volume=1)}}
+    tables={'2019-11-29':{'A':row(.1)},'2019-12-31':{'A':row(.2)}}
+    nav,trades,orders,held,pending=simulate(prices,{},days,tables,initial_capital=99_999,ticket=100_000,max_positions=10)
+    assert not held and nav[-1]['cash']==99_999
+
+
+def test_currency_metrics_use_initial_capital():
+    from dynamic_momentum import metrics
+    nav=[dict(date='2020-01-02',nav_stale=900_000),dict(date='2021-01-02',nav_stale=1_100_000)]
+    result=metrics(nav,'nav_stale',1_000_000)
+    assert abs(result['total']-.1)<1e-12 and abs(result['max_drawdown']+.1)<1e-12
+
+
+def test_locked_holding_counts_against_limit_and_profit_ticket_stays_fixed():
+    days=['2020-01-02','2020-01-03','2020-01-06']
+    prices={s:{d:dict(open=100,close=100,Trading_Volume=1) for d in days} for s in ['A','B']}
+    del prices['A'][days[-1]]
+    tables={'2019-11-29':{'A':row(.1),'B':row(.1)},'2019-12-31':{'A':row(.2),'B':row(.1)},days[1]:{'A':row(-.1),'B':row(.3)}}
+    nav,trades,orders,held,pending=simulate(prices,{},days,tables,initial_capital=200_000,ticket=100_000,max_positions=1)
+    assert set(held)=={'A'} and pending and nav[-1]['cash']==100_000
+    prices['A'][days[-1]]=dict(open=200,close=200,Trading_Volume=1)
+    nav,trades,orders,held,pending=simulate(prices,{},days,tables,initial_capital=200_000,ticket=100_000,max_positions=1)
+    assert set(held)=={'B'} and held['B']['cost']==100_000 and nav[-1]['cash']>190_000

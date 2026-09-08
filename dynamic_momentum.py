@@ -1,4 +1,5 @@
 """3-1 動態動能與三日成交金額：未認證價格回測，標準庫、唯讀資料。"""
+import argparse
 import csv
 import hashlib
 import json
@@ -67,11 +68,12 @@ def decisions(current,previous,older,held):
         elif c['outside']:exits[sid]='rank_below_40pct'
         elif p and o and c['score']<p['score']<o['score']:exits[sid]='two_declines'
     buys=[sid for sid,c in current.items() if sid not in held and c['top'] and c['liquid'] and c['score']>0 and sid in previous and c['score']>previous[sid]['score']]
+    buys.sort(key=lambda sid:(-current[sid]['score'],sid))
     return buys,exits
 
 
-def simulate(prices,events,calendar,tables,fee=.003):
-    cash=1.;held={};trades=[];nav=[];orders=[];pending={};buy_plan=[]
+def simulate(prices,events,calendar,tables,fee=.003,initial_capital=1.,ticket=None,max_positions=None):
+    cash=initial_capital;held={};trades=[];nav=[];orders=[];pending={};buy_plan=[]
     months=sorted(tables);prev={m:months[i-1] if i else None for i,m in enumerate(months)}
     warmup=[m for m in months if m<'2020-01-01']
     if warmup:
@@ -88,11 +90,13 @@ def simulate(prices,events,calendar,tables,fee=.003):
                 p=held.pop(sid);proceeds=p['shares']*r['open']*(1-fee);cash+=proceeds
                 trades.append(dict(stock_id=sid,entry=p['entry'],exit=day,reason=reason,return_net=proceeds/p['cost']-1,days=(date.fromisoformat(day)-date.fromisoformat(p['entry'])).days,cost=p['cost'],proceeds=proceeds))
                 del pending[sid]
-        budget=cash/len(buy_plan) if buy_plan else 0
+        budget=ticket if ticket is not None else (cash/len(buy_plan) if buy_plan else 0)
         for sid in buy_plan:
             r=prices[sid].get(day,{})
-            filled=budget>1e-12 and r.get('open',0)>0 and r.get('Trading_Volume',0)>0
-            orders.append(dict(day=day,stock_id=sid,filled=filled,budget=budget))
+            capacity=max_positions is None or len(held)<max_positions
+            affordable=cash+1e-8>=budget
+            filled=capacity and affordable and budget>1e-12 and r.get('open',0)>0 and r.get('Trading_Volume',0)>0
+            orders.append(dict(day=day,stock_id=sid,filled=filled,budget=budget,capacity=capacity,affordable=affordable))
             if filled:
                 held[sid]=dict(shares=budget/(r['open']*(1+fee)),mark=r['open'],cost=budget,entry=day)
                 cash-=budget
@@ -114,15 +118,20 @@ def simulate(prices,events,calendar,tables,fee=.003):
     return nav,trades,orders,held,pending
 
 
-def metrics(nav,key):
-    peak=1.;dd=0
+def metrics(nav,key,initial_capital=1.):
+    peak=initial_capital;dd=0
     for r in nav:
         peak=max(peak,r[key]);dd=min(dd,r[key]/peak-1)
     years=(date.fromisoformat(nav[-1]['date'])-date.fromisoformat(nav[0]['date'])).days/365.25
-    return dict(total=nav[-1][key]-1,cagr=nav[-1][key]**(1/years)-1,max_drawdown=dd)
+    return dict(total=nav[-1][key]/initial_capital-1,cagr=(nav[-1][key]/initial_capital)**(1/years)-1,max_drawdown=dd)
 
 
 def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--fixed10',action='store_true',help='100萬元、最多10檔、每筆含成本10萬元；不足10萬元不買')
+    args=parser.parse_args()
+    allocation=dict(initial_capital=1_000_000.,ticket=100_000.,max_positions=10) if args.fixed10 else {}
+    initial=allocation.get('initial_capital',1.)
     prices,events,calendar,index,fingerprint,excluded=load_data()
     ends={d[:7]:d for d in calendar};tables={}
     # Only completed months; include warmup signals for acceleration and decline checks.
@@ -133,20 +142,20 @@ def main():
     check='2022-12-30'
     truncated=signal_table({s:{d:r for d,r in rs.items() if d<=check} for s,rs in prices.items()},{k:v for k,v in events.items() if k[1]<=check},[d for d in calendar if d<=check],check)
     assert tables[check] and tables[check]==truncated
-    nav,trades,orders,held,pending=simulate(prices,events,calendar,tables)
-    prefix_nav=simulate({s:{d:r for d,r in rs.items() if d<=check} for s,rs in prices.items()},{k:v for k,v in events.items() if k[1]<=check},[d for d in calendar if d<=check],{d:t for d,t in tables.items() if d<=check})[0]
+    nav,trades,orders,held,pending=simulate(prices,events,calendar,tables,**allocation)
+    prefix_nav=simulate({s:{d:r for d,r in rs.items() if d<=check} for s,rs in prices.items()},{k:v for k,v in events.items() if k[1]<=check},[d for d in calendar if d<=check],{d:t for d,t in tables.items() if d<=check},**allocation)[0]
     assert prefix_nav==[r for r in nav if r['date']<=check]
-    sensitivity={str(f):metrics(simulate(prices,events,calendar,tables,fee=f)[0],'nav_stale') for f in (.0015,.006)}
-    out=Path('backtest/momentum_dynamic');out.mkdir(exist_ok=True)
+    sensitivity={str(f):metrics(simulate(prices,events,calendar,tables,fee=f,**allocation)[0],'nav_stale',initial) for f in (.0015,.006)}
+    out=Path('backtest/momentum_dynamic_fixed10' if args.fixed10 else 'backtest/momentum_dynamic');out.mkdir(exist_ok=True)
     signals=[dict(day=d,stock_id=s,**v) for d,t in tables.items() for s,v in t.items()]
     for name,rows in [('nav',nav),('trades',trades),('orders',orders),('signals',signals)]:
         with (out/(name+'.csv')).open('w',encoding='utf-8-sig',newline='') as f:
             w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
-    yearly=[];base=1
+    yearly=[];base=initial
     for year in sorted({r['date'][:4] for r in nav}):
         rows=[r for r in nav if r['date'].startswith(year)];end=rows[-1]['nav_stale']
         yearly.append(dict(year=year,return_net=end/base-1));base=end
-    summary=dict(excluded_unobserved_calendar_dates=excluded,cost_sensitivity=sensitivity,portfolio_prefix_invariance=True,certification='UNVERIFIED_PRICE_EXPLORATION',fingerprint=fingerprint,start=nav[0]['date'],end=nav[-1]['date'],first_fill=next(r['day'] for r in orders if r['filled']),stale_scenario=metrics(nav,'nav_stale'),zero_scenario=metrics(nav,'nav_missing_zero'),closed_trades=len(trades),win_rate=statistics.mean(t['return_net']>0 for t in trades),median_holding_days=statistics.median(t['days'] for t in trades),mean_holding_days=statistics.mean(t['days'] for t in trades),open_positions=len(held),pending_exits=pending,missing_mark_days=sum(r['missing_marks']>0 for r in nav),max_missing_marks=max(r['missing_marks'] for r in nav),mean_positions=statistics.mean(r['positions'] for r in nav),mean_cash_fraction=statistics.mean(r['cash']/r['nav_stale'] for r in nav),prefix_invariance=True,yearly=yearly,exit_reasons={reason:sum(t['reason']==reason for t in trades) for reason in {t['reason'] for t in trades}},taiex_close_total_return_reference=index[nav[-1]['date']]/index[nav[0]['date']]-1)
+    summary=dict(allocation=allocation,ending_equity=nav[-1]['nav_stale'],ending_cash=nav[-1]['cash'],max_positions_observed=max(r['positions'] for r in nav),excluded_unobserved_calendar_dates=excluded,cost_sensitivity=sensitivity,portfolio_prefix_invariance=True,certification='UNVERIFIED_PRICE_EXPLORATION',fingerprint=fingerprint,start=nav[0]['date'],end=nav[-1]['date'],first_fill=next(r['day'] for r in orders if r['filled']),stale_scenario=metrics(nav,'nav_stale',initial),zero_scenario=metrics(nav,'nav_missing_zero',initial),closed_trades=len(trades),win_rate=statistics.mean(t['return_net']>0 for t in trades),median_holding_days=statistics.median(t['days'] for t in trades),mean_holding_days=statistics.mean(t['days'] for t in trades),open_positions=len(held),pending_exits=pending,missing_mark_days=sum(r['missing_marks']>0 for r in nav),max_missing_marks=max(r['missing_marks'] for r in nav),mean_positions=statistics.mean(r['positions'] for r in nav),mean_cash_fraction=statistics.mean(r['cash']/r['nav_stale'] for r in nav),prefix_invariance=True,yearly=yearly,exit_reasons={reason:sum(t['reason']==reason for t in trades) for reason in {t['reason'] for t in trades}},taiex_close_total_return_reference=index[nav[-1]['date']]/index[nav[0]['date']]-1)
     (out/'result.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(summary,ensure_ascii=False,indent=2))
 
