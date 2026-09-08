@@ -1,0 +1,64 @@
+.................................F...................................... [ 20%]
+...................................................F.......F...F.F....F. [ 41%]
+........................................................................ [ 62%]
+........................................................................ [ 82%]
+...........................................................              [100%]
+================================== FAILURES ===================================
+_________________________ test_group_count_matches_db _________________________
+
+data = {'meta': {'latest_date': '2026-08-25', 'n_weeks': 153, 'n_sectors': 34, 'n_groups': 20}, 'weeks': [{'i': 0, 's': '2023...er': [182.6, 23.0, 146.6, -49.7, -194.8, -26.6, ...], 'total': [592.4, -559.8, -112.0, -770.0, 5.6, -708.0, ...]}, ...}
+conn = <sqlite3.Connection object at 0x000002E0F4B35C60>
+
+>   ???
+E   assert 20 == 19
+
+C:\CLAUDE\investing\tw-stock-db\tests\test_dashboard_export.py:76: AssertionError
+_____________________ test_monthly_revenue_no_orphan_rows _____________________
+
+conn = <sqlite3.Connection object at 0x000002E0F4B35C60>
+
+>   ???
+E   assert 106 == 0
+
+C:\CLAUDE\investing\tw-stock-db\tests\test_fundamentals_content.py:150: AssertionError
+____________ test_institutional_flow_summary_freshness_consistent _____________
+
+conn = <sqlite3.Connection object at 0x000002E0F4B35C60>
+
+>   ???
+E   AssertionError: 新鮮度落在 MAX(latest_date) 5 天內的比例過低（1849/1968=93.95%），latest_date 範圍 2025-07-08 ~ 2026-08-25，疑似抓取邏輯退化成只更新部分股票
+E   assert 0.9395325203252033 >= 0.95
+
+C:\CLAUDE\investing\tw-stock-db\tests\test_fundamentals_content.py:251: AssertionError
+________________ test_institutional_flow_tables_no_orphan_rows ________________
+
+conn = <sqlite3.Connection object at 0x000002E0F4B35C60>
+
+>   ???
+E   assert 2269 == 0
+
+C:\CLAUDE\investing\tw-stock-db\tests\test_fundamentals_content.py:313: AssertionError
+___________________ test_group_flow_daily_covers_19_groups ____________________
+
+conn = <sqlite3.Connection object at 0x000002E0F54BF010>
+
+>   ???
+E   assert 20 == 19
+
+C:\CLAUDE\investing\tw-stock-db\tests\test_group_flow.py:43: AssertionError
+___________________ test_group_flow_weekly_covers_19_groups ___________________
+
+conn = <sqlite3.Connection object at 0x000002E0F54BF010>
+
+>   ???
+E   assert 20 == 19
+
+C:\CLAUDE\investing\tw-stock-db\tests\test_group_flow.py:97: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_dashboard_export.py::test_group_count_matches_db - assert 2...
+FAILED tests/test_fundamentals_content.py::test_monthly_revenue_no_orphan_rows
+FAILED tests/test_fundamentals_content.py::test_institutional_flow_summary_freshness_consistent
+FAILED tests/test_fundamentals_content.py::test_institutional_flow_tables_no_orphan_rows
+FAILED tests/test_group_flow.py::test_group_flow_daily_covers_19_groups - ass...
+FAILED tests/test_group_flow.py::test_group_flow_weekly_covers_19_groups - as...
+6 failed, 341 passed in 15.12s

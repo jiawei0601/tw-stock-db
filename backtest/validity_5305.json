@@ -1,0 +1,15 @@
+{
+  "stock_id": "5305",
+  "dataset": "TaiwanStockPrice",
+  "raw_before": 0,
+  "adj_before": 0,
+  "status": 200,
+  "reason": "回應有資料",
+  "written": 217,
+  "raw_after": 217,
+  "adj_after": 217,
+  "range": [
+    "2020-01-02",
+    "2020-11-23"
+  ]
+}

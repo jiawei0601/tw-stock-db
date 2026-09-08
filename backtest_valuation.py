@@ -37,7 +37,6 @@ from backtest_validity import (
     compute_stock_forward_returns,
     generate_corporate_action_candidates,
     detect_corporate_actions_for_stock,
-    compute_holding_return_adjusted,
     check_stock_eligibility,
     check_continuous_eps,
     check_continuous_revenue,

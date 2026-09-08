@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+from split_price_returns import holding_return_from_split_prices
+
 import calendar
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -348,41 +350,6 @@ def generate_corporate_action_candidates(
         "top20_unresolved": top20_unresolved,
         "candidates_csv": str(out_path),
     }
-
-
-def compute_holding_return_adjusted(
-    price_rows_sorted: list[tuple[str, float]],
-    entry_date: str,
-    exit_date: str,
-    corp_actions_map: dict[str, float],
-) -> tuple[float | None, str]:
-    """計算還原公司行動後的持有期報酬。
-    以日報酬連乘計算：
-    一般日：ret_t = close_t / close_{t-1} - 1
-    事件日：ret_event = (close_t * S) / close_{t-1} - 1 （保留當日真實漲跌）
-    回傳：(ret, exit_reason)
-    """
-    sub_prices = [(d, c) for d, c in price_rows_sorted if entry_date <= d <= exit_date and c > 0]
-    if len(sub_prices) < 2:
-        return (None, "insufficient_data")
-
-    actual_exit_date = sub_prices[-1][0]
-    exit_reason = "normal" if actual_exit_date == exit_date else "last_available"
-
-    cum_ret = 1.0
-    for i in range(1, len(sub_prices)):
-        d_prev, p_prev = sub_prices[i - 1]
-        d_cur, p_cur = sub_prices[i]
-
-        if d_cur in corp_actions_map:
-            S = corp_actions_map[d_cur]
-            daily_r = (p_cur * S) / p_prev - 1.0
-        else:
-            daily_r = p_cur / p_prev - 1.0
-
-        cum_ret *= (1.0 + daily_r)
-
-    return (cum_ret - 1.0, exit_reason)
 
 
 def check_corp_action_in_window(
@@ -902,8 +869,8 @@ def compute_drifted_portfolio_equity_curve(
             for k in range(3):
                 for s in list(cohort_holdings[k].keys()):
                     p_rows = price_rows_by_stock.get(s, [])
-                    r_stock, _ = compute_holding_return_adjusted(
-                        p_rows, entry_d, exit_d, corp_map.get(s, {})
+                    r_stock, _ = holding_return_from_split_prices(
+                        p_rows, entry_d, exit_d
                     )
                     if r_stock is None:
                         r_stock = 0.0

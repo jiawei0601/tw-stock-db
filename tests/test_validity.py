@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 import backtest_validity as bv
+from split_price_returns import holding_return_from_split_prices
 from backtest_t1 import compute_institutional_flow_20d, evaluate_t1_tiers
 
 
@@ -111,7 +112,7 @@ def test_capital_reduction_detection_and_event_return_preservation():
     assert act["multiplier"] == pytest.approx(1.0 / 1.5)
 
     corp_map = {"2023-05-11": act["multiplier"]}
-    ret, exit_reason = bv.compute_holding_return_adjusted(price_rows, "2023-05-10", "2023-05-11", corp_map)
+    ret, exit_reason = holding_return_from_split_prices(build_split_fixture(price_rows, 100.0 / 150.0), "2023-05-10", "2023-05-11")
     assert ret == pytest.approx(0.02)
     assert ret != 0.0
     assert exit_reason == "normal"
@@ -134,7 +135,7 @@ def test_stock_split_adjustment_economic_return_zero():
     assert act["multiplier"] == 3.0
 
     corp_map = {"2023-06-02": 3.0}
-    ret, exit_reason = bv.compute_holding_return_adjusted(price_rows, "2023-06-01", "2023-06-02", corp_map)
+    ret, exit_reason = holding_return_from_split_prices(build_split_fixture(price_rows, 3.0), "2023-06-01", "2023-06-02")
     assert ret == pytest.approx(0.0)
     assert exit_reason == "normal"
 
@@ -150,7 +151,7 @@ def test_missing_exit_price_uses_last_available():
         ("2023-05-01", 120.0),
         ("2023-07-15", 130.0),
     ]
-    ret, exit_reason = bv.compute_holding_return_adjusted(price_rows, "2023-02-01", "2023-07-31", corp_actions_map={})
+    ret, exit_reason = holding_return_from_split_prices(price_rows, "2023-02-01", "2023-07-31")
     assert ret == pytest.approx(130.0 / 100.0 - 1.0)
     assert exit_reason == "last_available"
 
@@ -293,7 +294,7 @@ def test_confirmed_events_adjusted_unresolved_unadjusted():
     assert len(cands_0002) == 1
     assert "0002" not in events_map
 
-    ret_unresolved, _ = bv.compute_holding_return_adjusted(price_rows_0002, "2023-06-01", "2023-06-02", corp_actions_map={})
+    ret_unresolved, _ = holding_return_from_split_prices(build_split_fixture(price_rows_0002, None), "2023-06-01", "2023-06-02")
     assert ret_unresolved == pytest.approx(1.0)
 
 
@@ -411,3 +412,81 @@ def test_equal_dollar_tranche_formula():
     assert ret_arithmetic != pytest.approx(0.50)
     assert ret_formula != ret_arithmetic
 
+
+
+def build_split_fixture(rows, ratio):
+    import sqlite3
+    from build_valuation import build_adj_prices_from_events
+    with sqlite3.connect(":memory:") as conn:
+        conn.executescript("CREATE TABLE fm_price_daily(stock_id,date,close); CREATE TABLE fm_corporate_events(stock_id,date,ratio,source); CREATE TABLE fm_price_adj_daily(stock_id,date,close_adj,PRIMARY KEY(stock_id,date));")
+        conn.executemany("INSERT INTO fm_price_daily VALUES ('TEST',?,?)", rows)
+        if ratio is not None:
+            conn.execute("INSERT INTO fm_corporate_events VALUES ('TEST',?,?,'測試')", (rows[-1][0], ratio))
+        build_adj_prices_from_events(conn, stock_id="TEST")
+        return conn.execute("SELECT date,close_adj FROM fm_price_adj_daily ORDER BY date").fetchall()
+
+
+def test_event_fetch_utf8_and_idempotent(monkeypatch):
+    import json
+    import sqlite3
+    import build_valuation as build
+    import requests
+    class Response:
+        status_code = 200
+        def __init__(self, dataset):
+            data = [{"stock_id": "1234", "date": "2025-06-01", "type": "股票分割", "before_price": 400, "after_price": 100}] if dataset == "TaiwanStockSplitPrice" else []
+            self.content = json.dumps({"status": 200, "data": data}, ensure_ascii=False).encode("utf-8")
+    monkeypatch.setattr(requests.Session, "get", lambda self, url, params, timeout: Response(params["dataset"]))
+    monkeypatch.setattr(build, "_finmind_token", lambda: "假權杖")
+    monkeypatch.setattr(build.time, "sleep", lambda seconds: None)
+    with sqlite3.connect(":memory:") as conn:
+        conn.executescript("CREATE TABLE fm_corporate_events(stock_id,date,event_type,before_price,after_price,ratio,raw_json,source,PRIMARY KEY(stock_id,date,source)); CREATE TABLE fm_delisting(stock_id,date,name);")
+        build.fetch_corporate_events(conn)
+        build.fetch_corporate_events(conn)
+        row = conn.execute("SELECT event_type,raw_json FROM fm_corporate_events").fetchall()
+        assert len(row) == 1
+        assert row[0][0] == "股票分割"
+        assert json.loads(row[0][1])["type"] == "股票分割"
+        # 相同事件不同來源仍只保留一列，NULL 價格亦同。
+        event = ("5678", "2025-06-01", "減資", None, None, None, "{}", "來源一")
+        build.write_corporate_event(conn, event)
+        build.write_corporate_event(conn, event[:-1] + ("來源二",))
+        assert conn.execute("SELECT count(*) FROM fm_corporate_events WHERE stock_id='5678'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("block", [6, 12])
+def test_recheck_bootstrap_actual_repeat_and_seed_drift(block):
+    from verify_validity_numbers import bootstrap
+    parent = [i / 1000 for i in range(36)]
+    child = [p + ((i * 7) % 19 - 8) / 100 for i, p in enumerate(parent)]
+    diff = [c - p for c, p in zip(child, parent)]
+    first = bootstrap(diff, block, seed=42)
+    assert first == bootstrap(diff, block, seed=42)
+    assert first != bootstrap(diff, block, seed=43)
+    production1 = bv.block_bootstrap_paired_diff(child, parent, block_size=block, seed=42)
+    production2 = bv.block_bootstrap_paired_diff(child, parent, block_size=block, seed=42)
+    production43 = bv.block_bootstrap_paired_diff(child, parent, block_size=block, seed=43)
+    for i, endpoint in enumerate(["ci_95_lower", "ci_95_upper"]):
+        assert production1[endpoint] == production2[endpoint]
+        assert first[i] == pytest.approx(production1[endpoint], abs=1e-14)
+    assert (production43["ci_95_lower"], production43["ci_95_upper"]) != first
+
+
+def test_recheck_ranks_ties_and_missing():
+    from verify_validity_numbers import ranks
+    assert ranks({"a": 2, "b": 2, "c": 1, "d": None}) == {"a": 2.5/3, "b": 2.5/3, "c": 1/3}
+
+
+def test_recheck_forward_missing_cash_and_censoring():
+    from verify_validity_numbers import forward
+    dates = ["2023-01-31", "2023-02-01", "2023-02-02", "2023-02-03", "2023-05-02", "2023-08-01"]
+    index = {d:i for i,d in enumerate(dates)}
+    p = {"2023-02-02":100, "2023-05-02":125}
+    assert forward(p, dates, index, dates[0], dates[-1], None) == (0.25, True)
+    assert forward({}, dates, index, dates[0], dates[-1], None) == (0.0, False)
+    assert forward(p, dates, index, dates[0], None, None) == (None, False)
+
+
+def test_split_price_holding_return_empty_and_single_price():
+    assert holding_return_from_split_prices([], "2023-01-01", "2023-02-01") == (None, "insufficient_data")
+    assert holding_return_from_split_prices([("2023-01-02",100)], "2023-01-01", "2023-02-01") == (None, "insufficient_data")

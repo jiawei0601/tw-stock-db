@@ -1083,13 +1083,32 @@ def screen(conn: sqlite3.Connection) -> dict:
 # --fetch-events & --fetch-adj（工單第 0 節：公司行動與還原股價）
 # ---------------------------------------------------------------------------
 
+def ensure_corporate_event_key(conn: sqlite3.Connection) -> None:
+    """以事件內容去重；NULL 價格也視為相同鍵，不受來源名稱影響。"""
+    conn.execute("""DELETE FROM fm_corporate_events WHERE rowid NOT IN (
+        SELECT MIN(rowid) FROM fm_corporate_events
+        GROUP BY stock_id, date, event_type, before_price, after_price)""")
+    conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS corporate_event_identity
+        ON fm_corporate_events(stock_id, date, COALESCE(event_type, ''),
+        COALESCE(before_price, 'NULL'), COALESCE(after_price, 'NULL'))""")
+
+
+def write_corporate_event(conn: sqlite3.Connection, event: tuple) -> None:
+    """Python Unicode 直接傳入 SQLite；原始 JSON 以 UTF-8 解碼，不經系統碼頁。"""
+    conn.execute("""INSERT OR REPLACE INTO fm_corporate_events
+        (stock_id, date, event_type, before_price, after_price, ratio, raw_json, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", event)
+
+
 def fetch_corporate_events(conn: sqlite3.Connection) -> dict:
     """抓全市場公司行動事件（不帶 data_id，start_date=2020-01-01）：
     TaiwanStockSplitPrice, TaiwanStockCapitalReductionReferencePrice,
     TaiwanStockParValueChange, TaiwanStockDelisting。
     寫入 fm_corporate_events 與 fm_delisting。"""
     import requests
-    import pandas as pd
+    import csv
+
+    ensure_corporate_event_key(conn)
 
     token = _finmind_token()
     session = requests.Session()
@@ -1125,7 +1144,10 @@ def fetch_corporate_events(conn: sqlite3.Connection) -> dict:
 
         if resp is not None and resp.status_code == 200:
             try:
-                payload = resp.json()
+                payload = json.loads(resp.content.decode("utf-8-sig"))
+                if payload.get("status") in (402, 403):
+                    stopped_reason = f"error_{payload['status']}"
+                    return None, payload["status"]
                 if payload.get("status") == 200:
                     return payload.get("data", []), 200
             except Exception as exc:
@@ -1147,10 +1169,7 @@ def fetch_corporate_events(conn: sqlite3.Connection) -> dict:
             bp = d.get("before_price")
             ap = d.get("after_price")
             ratio = (bp / ap) if (bp is not None and ap and ap > 0) else None
-            conn.execute(
-                """INSERT OR REPLACE INTO fm_corporate_events
-                   (stock_id, date, event_type, before_price, after_price, ratio, raw_json, source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            write_corporate_event(conn,
                 (sid, dt, d.get("type", "split"), bp, ap, ratio, json.dumps(d, ensure_ascii=False), "TaiwanStockSplitPrice")
             )
             events_inserted += 1
@@ -1168,10 +1187,7 @@ def fetch_corporate_events(conn: sqlite3.Connection) -> dict:
             bp = d.get("before_close")
             ap = d.get("after_ref_close")
             ratio = (bp / ap) if (bp is not None and ap and ap > 0) else None
-            conn.execute(
-                """INSERT OR REPLACE INTO fm_corporate_events
-                   (stock_id, date, event_type, before_price, after_price, ratio, raw_json, source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            write_corporate_event(conn,
                 (sid, dt, "par_value_change", bp, ap, ratio, json.dumps(d, ensure_ascii=False), "TaiwanStockParValueChange")
             )
             events_inserted += 1
@@ -1206,10 +1222,7 @@ def fetch_corporate_events(conn: sqlite3.Connection) -> dict:
             bp = d.get("ClosingPriceonTheLastTradingDay")
             ap = d.get("PostReductionReferencePrice")
             ratio = (bp / ap) if (bp is not None and ap and ap > 0) else None
-            conn.execute(
-                """INSERT OR REPLACE INTO fm_corporate_events
-                   (stock_id, date, event_type, before_price, after_price, ratio, raw_json, source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            write_corporate_event(conn,
                 (sid, dt, d.get("ReasonforCapitalReduction", "capital_reduction"), bp, ap, ratio, json.dumps(d, ensure_ascii=False), "TaiwanStockCapitalReductionReferencePrice")
             )
             events_inserted += 1
@@ -1217,7 +1230,8 @@ def fetch_corporate_events(conn: sqlite3.Connection) -> dict:
         # FinMind register tier 不允許不帶 data_id，降級逐一對 survivors 抓取
         survivors_path = Path(__file__).parent / "backtest" / "universe_2026_survivors.csv"
         if survivors_path.exists():
-            sids = pd.read_csv(survivors_path)["stock_id"].astype(str).tolist()
+            with survivors_path.open(encoding="utf-8-sig", newline="") as handle:
+                sids = [row["stock_id"] for row in csv.DictReader(handle)]
             for sid in sids:
                 already = conn.execute(
                     "SELECT 1 FROM valuation_fetch_log WHERE stock_id=? AND dataset='TaiwanStockCapitalReductionReferencePrice' AND status='fetched' LIMIT 1",
@@ -1241,10 +1255,7 @@ def fetch_corporate_events(conn: sqlite3.Connection) -> dict:
                         bp = d.get("ClosingPriceonTheLastTradingDay")
                         ap = d.get("PostReductionReferencePrice")
                         ratio = (bp / ap) if (bp is not None and ap and ap > 0) else None
-                        conn.execute(
-                            """INSERT OR REPLACE INTO fm_corporate_events
-                               (stock_id, date, event_type, before_price, after_price, ratio, raw_json, source)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        write_corporate_event(conn,
                             (sid, dt, d.get("ReasonforCapitalReduction", "capital_reduction"), bp, ap, ratio, json.dumps(d, ensure_ascii=False), "TaiwanStockCapitalReductionReferencePrice")
                         )
                         events_inserted += 1
@@ -1263,7 +1274,7 @@ def fetch_corporate_events(conn: sqlite3.Connection) -> dict:
     }
 
 
-def build_adj_prices_from_events(conn: sqlite3.Connection) -> int:
+def build_adj_prices_from_events(conn: sqlite3.Connection, stock_id: str | None = None) -> int:
     """從 fm_price_daily 與已確認事件 (fm_corporate_events) 建立 fm_price_adj_daily。
     無事件區間保持原始價格報酬；只有 confirmed 事件前之價格向後調整除以 ratio。"""
     # 讀取所有事件並按 (stock_id, date) 去重
@@ -1284,7 +1295,7 @@ def build_adj_prices_from_events(conn: sqlite3.Connection) -> int:
         events_by_stock.setdefault(sid, []).append((dt, float(r)))
 
     # 取出所有股票
-    stocks = [row[0] for row in conn.execute("SELECT DISTINCT stock_id FROM fm_price_daily").fetchall()]
+    stocks = [stock_id] if stock_id else [row[0] for row in conn.execute("SELECT DISTINCT stock_id FROM fm_price_daily").fetchall()]
     total_written = 0
 
     for sid in stocks:

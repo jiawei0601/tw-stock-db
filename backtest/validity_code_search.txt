@@ -1,0 +1,5 @@
+搜尋範圍：根目錄 *.py、backtest/*.py、tests/**/*.py；以 Python 逐行搜尋（工單只准 Python，未執行 grep）。
+compute_holding_return_adjusted：0 筆
+
+0050：1 筆
+tests\test_momentum_pit_fetch.py:40:                {"stock_id": "0050", "type": "twse"}]
