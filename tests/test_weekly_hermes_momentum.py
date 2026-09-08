@@ -152,3 +152,58 @@ def test_fast_signal_matches_original():
 def test_executed_later_ma_never_rechecks_earlier_ma():
     p=dict(ever20=True,done={60})
     assert hermes_stages(p,130,{20:150,60:150,120:150})==[120]
+
+
+def test_diagnostic_momentum_switch_retains_old_exit_with_sop():
+    prices,ds,tables=observation_scenario(last='2020-02-04')
+    tables['2020-01-31']={'A':row(-.1)}
+    result=simulate_weekly(prices,{},ds,tables,True,observation_days=90,momentum_exit=True)
+    assert result[1][0]['exit']=='2020-02-03' and result[1][0]['last_reason']=='nonpositive'
+
+
+def test_diagnostic_ma_disable_leaves_promoted_position_intact():
+    prices,ds,tables=scenario()
+    cache={('A',d):{20:140,60:140,120:140} for d in ds}
+    result=simulate_weekly(prices,{},ds,tables,True,cache,90,ma_exit=False)
+    assert not result[1] and not result[2] and result[4]['A']['remaining']==1
+
+
+def test_equity_allocation_has_no_ten_stock_or_ticket_limit():
+    prices,ds,tables=scenario()
+    prices={str(i):{d:dict(r,close=100,open=100) for d,r in prices['A'].items()} for i in range(20)}
+    tables={d:{s:row(.1 if d<'2020-01-01' else .2) for s in prices} for d in ['2019-11-29','2019-12-31','2020-01-08']}
+    result=simulate_weekly(prices,{},ds,tables,True,observation_days=90,equity_allocation=True)
+    assert len(result[4])==20
+    assert all(abs(p['cost']-50_000)<1e-8 for p in result[4].values())
+    assert min(r['cash'] for r in result[0])>=0
+
+
+def test_equity_ticket_can_exceed_old_100k_limit():
+    prices,ds,tables=scenario()
+    cache={('A',d):{} for d in ds}
+    result=simulate_weekly(prices,{},ds,tables,True,cache,90,equity_allocation=True)
+    assert result[4]['A']['cost']==1_000_000
+
+
+def test_equity_new_targets_use_signal_nav_and_cash_cap():
+    ds=['2019-11-29','2019-12-31','2020-01-08','2020-01-09','2020-01-15','2020-01-16','2020-01-17']
+    prices={s:{d:dict(open=100,close=100,Trading_Volume=1) for d in ds} for s in ['A','B','C']}
+    # First selection A+B, B cannot fill: unused budget remains cash.
+    prices['B']['2020-01-09']['open']=0
+    tables={'2019-11-29':{s:row(.1) for s in prices},'2019-12-31':{s:row(.1) for s in prices},'2020-01-08':{'A':row(.2),'B':row(.2)},'2020-01-15':{'A':row(.2),'B':row(.2),'C':row(.3)}}
+    result=simulate_weekly(prices,{},ds,tables,True,observation_days=90,equity_allocation=True)
+    assert result[4]['A']['cost']==500_000
+    assert result[4]['B']['cost']==250_000 and result[4]['C']['cost']==250_000
+    assert result[0][-1]['cash']==0
+
+
+def test_equity_target_uses_wednesday_nav_not_next_open():
+    ds=['2019-11-29','2019-12-31','2020-01-08','2020-01-09','2020-01-15','2020-01-16']
+    prices={s:{d:dict(open=100,close=100,Trading_Volume=1) for d in ds} for s in ['A','B','C']}
+    prices['B']['2020-01-09']['open']=0
+    prices['C']['2020-01-16'].update(open=200,close=200)
+    tables={'2019-11-29':{s:row(.1) for s in prices},'2019-12-31':{s:row(.1) for s in prices},'2020-01-08':{'A':row(.2),'B':row(.2)},'2020-01-15':{'A':row(.2),'C':row(.3)}}
+    result=simulate_weekly(prices,{},ds,tables,True,observation_days=90,equity_allocation=True)
+    expected=(500_000+500_000/1.003)/2
+    assert abs(result[4]['C']['cost']-expected)<1e-8
+    assert result[4]['A']['cost']==500_000 and result[0][-1]['cash']>0

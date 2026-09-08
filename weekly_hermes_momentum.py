@@ -1,4 +1,5 @@
 """Hermes 均線分批出場 + 每週三選股；未認證價格研究。"""
+import argparse
 import csv
 import json
 import math
@@ -32,8 +33,12 @@ def hermes_stages(position,close,averages):
     return [n for n in STAGES if n>max(position['done'],default=0) and n in averages and close<averages[n]]
 
 
-def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,observation_days=None):
-    cash=1_000_000.;held={};pending={};buy_plan=[];nav=[];legs=[];roundtrips=[];orders=[]
+def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,observation_days=None,*,momentum_exit=None,net_stop=None,cost_floor=None,ma_exit=None,equity_allocation=False):
+    momentum_exit=(not trailing) if momentum_exit is None else momentum_exit
+    net_stop=(not trailing) if net_stop is None else net_stop
+    cost_floor=trailing if cost_floor is None else cost_floor
+    ma_exit=trailing if ma_exit is None else ma_exit
+    cash=1_000_000.;held={};pending={};buy_plan=[];plan_target=0.;nav=[];legs=[];roundtrips=[];orders=[]
     ends={d[:7]:d for d in calendar}
     ma_cache={} if ma_cache is None else ma_cache
     for day in calendar:
@@ -59,13 +64,14 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
             if p['remaining']<1e-9:
                 roundtrips.append(dict(stock_id=sid,entry=p['entry'],exit=day,cost=p['cost'],proceeds=p['proceeds'],return_net=p['proceeds']/p['cost']-1,days=(date.fromisoformat(day)-date.fromisoformat(p['entry'])).days,last_reason=order['reason']))
                 del held[sid]
+        budget=min(plan_target,cash/len(buy_plan)) if equity_allocation and buy_plan else 100_000.
         for sid in buy_plan:
             r=prices[sid].get(day,{})
-            filled=len(held)<10 and cash+1e-8>=100_000 and r.get('open',0)>0 and r.get('Trading_Volume',0)>0
-            orders.append(dict(date=day,stock_id=sid,filled=filled,budget=100_000))
+            filled=(equity_allocation or len(held)<10) and budget>1e-8 and cash+1e-8>=budget and r.get('open',0)>0 and r.get('Trading_Volume',0)>0
+            orders.append(dict(date=day,stock_id=sid,filled=filled,budget=budget))
             if filled:
-                cash-=100_000
-                held[sid]=dict(entry=day,cost=100_000.,original_shares=100_000/(r['open']*1.003),remaining=1.,done=set(),mark=r['open'],proceeds=0.,ever20=False)
+                cash-=budget
+                held[sid]=dict(entry=day,cost=budget,original_shares=budget/(r['open']*1.003),remaining=1.,done=set(),mark=r['open'],proceeds=0.,ever20=False)
         buy_plan=[];cash=max(cash,0.)
         value=zero=cash;missing=0
         for sid,p in held.items():
@@ -81,8 +87,10 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
         current=tables.get(day,{})
         if day in tables:
             buys,exits=decisions(current,tables.get(prior,{}),tables.get(older,{}),held)
-            if date.fromisoformat(day).weekday()==2:buy_plan=buys
-            if not trailing and day==ends[day[:7]]:
+            if date.fromisoformat(day).weekday()==2:
+                buy_plan=buys
+                plan_target=value/(len(held)+len(buys)) if buys else 0.
+            if momentum_exit and day==ends[day[:7]]:
                 for sid,reason in exits.items():
                     if sid not in pending or not pending[sid]['full']:
                         pending[sid]=dict(full=True,stages=[],reason=reason,signal=day)
@@ -95,15 +103,15 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
             # SOP thresholds use raw entry cost price; transaction costs affect P&L only.
             price_value=p['original_shares']*r['close']
             basis=p['cost']/1.003
-            breach=(price_value < basis*(1.0 if p['ever20'] else .90)) if trailing else (price_value*.997 < p['cost']*.90)
+            breach=(price_value < basis) if cost_floor and p['ever20'] else ((price_value*.997 < p['cost']*.90) if net_stop else (price_value < basis*.90))
             if breach:
-                reason='cost_floor' if trailing and p['ever20'] else 'stop_loss'
+                reason='cost_floor' if cost_floor and p['ever20'] else 'stop_loss'
                 if pending.get(sid,{}).get('reason')!=reason:
                     pending[sid]=dict(full=True,stages=[],reason=reason,signal=day)
                 continue
             if deadline is not None and day>=deadline and not p['ever20'] and not pending.get(sid,{}).get('full'):
                 pending[sid]=dict(full=True,stages=[],reason='observation_90',signal=day)
-            if not trailing or pending.get(sid,{}).get('full'):continue
+            if not ma_exit or not p['ever20'] or pending.get(sid,{}).get('full'):continue
             key=(sid,day)
             if key not in ma_cache:ma_cache[key]=moving_averages(prices,events,calendar,day,sid)
             stages=hermes_stages(p,r['close'],ma_cache[key])
@@ -124,6 +132,9 @@ def summarize(result):
 
 
 def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--equity-allocation',action='store_true',help='無檔數上限，新倉按訊號日淨值等權目標、現金同比縮小')
+    args=parser.parse_args()
     prices,events,calendar,index,fingerprint,excluded=load_data()
     ends={d[:7]:d for d in calendar}
     valid={s:sorted(d for d,r in rows.items() if r.get('close',0)>0 and r.get('Trading_Volume',0)>0) for s,rows in prices.items()}
@@ -135,23 +146,23 @@ def main():
     print('訊號準備完成',len(tables),flush=True)
     cache={}
     baseline=simulate_weekly(prices,events,calendar,tables,False,cache)
-    result=simulate_weekly(prices,events,calendar,tables,True,cache,observation_days=90)
+    result=simulate_weekly(prices,events,calendar,tables,True,cache,observation_days=90,equity_allocation=args.equity_allocation)
     check='2022-12-30'
     prefix_prices={s:{d:r for d,r in rs.items() if d<=check} for s,rs in prices.items()}
     prefix_events={k:v for k,v in events.items() if k[1]<=check}
     prefix_calendar=[d for d in calendar if d<=check]
     prefix_tables={d:t for d,t in tables.items() if d<=check}
     assert tables[check]==signal_table(prefix_prices,prefix_events,prefix_calendar,check)
-    prefix=simulate_weekly(prefix_prices,prefix_events,prefix_calendar,prefix_tables,True,observation_days=90)
+    prefix=simulate_weekly(prefix_prices,prefix_events,prefix_calendar,prefix_tables,True,observation_days=90,equity_allocation=args.equity_allocation)
     assert prefix[0]==[r for r in result[0] if r['date']<=check]
     assert prefix[2]==[r for r in result[2] if r['exit']<=check]
-    out=Path('backtest/momentum_weekly_hermes');out.mkdir(exist_ok=True)
+    out=Path('backtest/momentum_weekly_hermes_equity' if args.equity_allocation else 'backtest/momentum_weekly_hermes');out.mkdir(exist_ok=True)
     for name,rows in zip(['nav','roundtrips','sell_legs','orders'],result[:4]):
         with (out/(name+'.csv')).open('w',encoding='utf-8-sig',newline='') as f:
             if rows:
                 w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
     (out/'holdings.json').write_text(json.dumps(result[4],default=lambda x:sorted(x),indent=2),encoding='utf-8')
-    summary=dict(certification='UNVERIFIED_PRICE_EXPLORATION',fingerprint=fingerprint,excluded_dates=excluded,prefix_invariance=True,weekly_stop_only=summarize(baseline),weekly_hermes90=summarize(result))
+    summary=dict(equity_allocation=args.equity_allocation,certification='UNVERIFIED_PRICE_EXPLORATION',fingerprint=fingerprint,excluded_dates=excluded,prefix_invariance=True,weekly_stop_only=summarize(baseline),weekly_hermes90=summarize(result))
     (out/'result.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(summary,ensure_ascii=False,indent=2))
 
