@@ -1,5 +1,13 @@
 # HANDOFF
 
+## 真實行情初步驗證（Codex，2026-09-08）
+
+- 使用者授權先用現有資料驗證；新增獨立 `preliminary_momentum.py`，未繞過正式引擎的證據驗收。結果及限制已追蹤於 `analysis/momentum-preliminary-2026-09-08.md`；逐股／逐月 CSV 在忽略目錄 `backtest/momentum_preliminary/`。
+- 6 個月動能相對同池等權平均高約 1.1 個百分點，12 個月低約 2.4–2.6 個百分點；價格近似、未完整含息、缺出口使用兩情境，不能宣稱穩健超越大盤。
+- 已完成真實 2022-12-30 排名截斷不變性檢查；歷史母體與事件修訂仍未認證。後續仍需下載完成及證據核對，才可正式回測。
+- 本輪新測試 4 項與既有動能／下載測試 42 項全部通過；未重跑整庫測試。本輪只提交自身程式、測試與文件；其他代理的工作區變更保留。前一動能引擎提交為 d6bce48，本輪提交可由 git log 定位。
+
+
 ## 程式階段檢查點：動能引擎已可先跑（Codex，2026-09-08）
 
 - 使用者已確認先做程式、不等下載完。新增 `momentum_engine.py`、`momentum_data.py`、`backtest_momentum.py`。操作／限制：`docs/momentum-backtest.md`；證據空模板：`docs/momentum-evidence-template.json`。
