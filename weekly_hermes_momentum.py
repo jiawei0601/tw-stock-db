@@ -33,7 +33,7 @@ def hermes_stages(position,close,averages):
     return [n for n in STAGES if n>max(position['done'],default=0) and n in averages and close<averages[n]]
 
 
-def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,observation_days=None,*,momentum_exit=None,net_stop=None,cost_floor=None,ma_exit=None,equity_allocation=False):
+def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,observation_days=None,*,momentum_exit=None,net_stop=None,cost_floor=None,ma_exit=None,equity_allocation=False,position_weight=None):
     momentum_exit=(not trailing) if momentum_exit is None else momentum_exit
     net_stop=(not trailing) if net_stop is None else net_stop
     cost_floor=trailing if cost_floor is None else cost_floor
@@ -64,10 +64,10 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
             if p['remaining']<1e-9:
                 roundtrips.append(dict(stock_id=sid,entry=p['entry'],exit=day,cost=p['cost'],proceeds=p['proceeds'],return_net=p['proceeds']/p['cost']-1,days=(date.fromisoformat(day)-date.fromisoformat(p['entry'])).days,last_reason=order['reason']))
                 del held[sid]
-        budget=min(plan_target,cash/len(buy_plan)) if equity_allocation and buy_plan else 100_000.
+        budget=plan_target if position_weight is not None else (min(plan_target,cash/len(buy_plan)) if equity_allocation and buy_plan else 100_000.)
         for sid in buy_plan:
             r=prices[sid].get(day,{})
-            filled=(equity_allocation or len(held)<10) and budget>1e-8 and cash+1e-8>=budget and r.get('open',0)>0 and r.get('Trading_Volume',0)>0
+            filled=(equity_allocation or position_weight is not None or len(held)<10) and budget>1e-8 and cash+1e-8>=budget and r.get('open',0)>0 and r.get('Trading_Volume',0)>0
             orders.append(dict(date=day,stock_id=sid,filled=filled,budget=budget))
             if filled:
                 cash-=budget
@@ -89,7 +89,7 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
             buys,exits=decisions(current,tables.get(prior,{}),tables.get(older,{}),held)
             if date.fromisoformat(day).weekday()==2:
                 buy_plan=buys
-                plan_target=value/(len(held)+len(buys)) if buys else 0.
+                plan_target=value*position_weight if position_weight is not None else (value/(len(held)+len(buys)) if buys else 0.)
             if momentum_exit and day==ends[day[:7]]:
                 for sid,reason in exits.items():
                     if sid not in pending or not pending[sid]['full']:
@@ -134,7 +134,11 @@ def summarize(result):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--equity-allocation',action='store_true',help='無檔數上限，新倉按訊號日淨值等權目標、現金同比縮小')
+    parser.add_argument('--momentum-exit',action='store_true',help='月底動能出場＋每日淨虧損10%停損，取消Hermes分批與90天期限')
+    parser.add_argument('--position-weight',type=float,default=None,help='每筆新倉占訊號日淨值比例，例如0.05；不足整筆金額不買')
     args=parser.parse_args()
+    if args.position_weight is not None and not 0<args.position_weight<=1:parser.error('--position-weight 必須介於0與1')
+    exit_options=dict(trailing=not args.momentum_exit,observation_days=None if args.momentum_exit else 90,equity_allocation=args.equity_allocation,position_weight=args.position_weight)
     prices,events,calendar,index,fingerprint,excluded=load_data()
     ends={d[:7]:d for d in calendar}
     valid={s:sorted(d for d,r in rows.items() if r.get('close',0)>0 and r.get('Trading_Volume',0)>0) for s,rows in prices.items()}
@@ -146,23 +150,23 @@ def main():
     print('訊號準備完成',len(tables),flush=True)
     cache={}
     baseline=simulate_weekly(prices,events,calendar,tables,False,cache)
-    result=simulate_weekly(prices,events,calendar,tables,True,cache,observation_days=90,equity_allocation=args.equity_allocation)
+    result=simulate_weekly(prices,events,calendar,tables,ma_cache=cache,**exit_options)
     check='2022-12-30'
     prefix_prices={s:{d:r for d,r in rs.items() if d<=check} for s,rs in prices.items()}
     prefix_events={k:v for k,v in events.items() if k[1]<=check}
     prefix_calendar=[d for d in calendar if d<=check]
     prefix_tables={d:t for d,t in tables.items() if d<=check}
     assert tables[check]==signal_table(prefix_prices,prefix_events,prefix_calendar,check)
-    prefix=simulate_weekly(prefix_prices,prefix_events,prefix_calendar,prefix_tables,True,observation_days=90,equity_allocation=args.equity_allocation)
+    prefix=simulate_weekly(prefix_prices,prefix_events,prefix_calendar,prefix_tables,**exit_options)
     assert prefix[0]==[r for r in result[0] if r['date']<=check]
     assert prefix[2]==[r for r in result[2] if r['exit']<=check]
-    out=Path('backtest/momentum_weekly_hermes_equity' if args.equity_allocation else 'backtest/momentum_weekly_hermes');out.mkdir(exist_ok=True)
+    out=Path(('backtest/momentum_weekly_hermes_equity' if args.equity_allocation else 'backtest/momentum_weekly_hermes')+('_momentum_exit' if args.momentum_exit else '')+(f'_weight{args.position_weight:g}' if args.position_weight is not None else ''));out.mkdir(exist_ok=True)
     for name,rows in zip(['nav','roundtrips','sell_legs','orders'],result[:4]):
         with (out/(name+'.csv')).open('w',encoding='utf-8-sig',newline='') as f:
             if rows:
                 w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
     (out/'holdings.json').write_text(json.dumps(result[4],default=lambda x:sorted(x),indent=2),encoding='utf-8')
-    summary=dict(equity_allocation=args.equity_allocation,certification='UNVERIFIED_PRICE_EXPLORATION',fingerprint=fingerprint,excluded_dates=excluded,prefix_invariance=True,weekly_stop_only=summarize(baseline),weekly_hermes90=summarize(result))
+    summary=dict(exit_options=exit_options,equity_allocation=args.equity_allocation,certification='UNVERIFIED_PRICE_EXPLORATION',fingerprint=fingerprint,excluded_dates=excluded,prefix_invariance=True,weekly_stop_only=summarize(baseline),**{'weekly_momentum_exit' if args.momentum_exit else 'weekly_hermes90':summarize(result)})
     (out/'result.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(summary,ensure_ascii=False,indent=2))
 

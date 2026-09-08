@@ -48,3 +48,7 @@ backtest/momentum_weekly_hermes/
 backtest/momentum_gap/
 
 backtest/momentum_weekly_hermes_equity/
+
+backtest/momentum_weekly_hermes_equity_momentum_exit/
+
+backtest/momentum_weekly_hermes_equity_momentum_exit_weight*/

@@ -207,3 +207,43 @@ def test_equity_target_uses_wednesday_nav_not_next_open():
     expected=(500_000+500_000/1.003)/2
     assert abs(result[4]['C']['cost']-expected)<1e-8
     assert result[4]['A']['cost']==500_000 and result[0][-1]['cash']>0
+
+
+def test_equity_momentum_exit_ignores_observation_and_ma():
+    prices,ds,tables=observation_scenario(last='2020-04-15',peak=True)
+    cache={('A',d):{20:150,60:150,120:150} for d in ds}
+    result=simulate_weekly(prices,{},ds,tables,False,cache,equity_allocation=True)
+    assert not result[2] and result[4]['A']['cost']==1_000_000
+    tables['2020-03-31']={'A':row(-.1)}
+    result=simulate_weekly(prices,{},ds,tables,False,cache,equity_allocation=True)
+    assert result[2][0]['reason']=='nonpositive' and result[2][0]['exit']=='2020-04-01'
+
+
+def test_equity_momentum_daily_net_stop_still_active():
+    prices,ds,tables=scenario()
+    prices['A']['2020-01-09']['close']=90.5
+    result=simulate_weekly(prices,{},ds,tables,False,equity_allocation=True)
+    assert result[2][0]['reason']=='stop_loss'
+    assert result[2][0]['signal_date']=='2020-01-09' and result[2][0]['exit']=='2020-01-10'
+
+
+def test_five_percent_initial_tickets_no_borrow_or_partial_ticket():
+    prices,ds,tables=scenario()
+    prices={str(i):{d:dict(r,open=100,close=100) for d,r in prices['A'].items()} for i in range(25)}
+    tables={d:{s:row(.1 if d<'2020-01-01' else .2+int(s)/1000) for s in prices} for d in ['2019-11-29','2019-12-31','2020-01-08']}
+    result=simulate_weekly(prices,{},ds,tables,False,equity_allocation=True,position_weight=.05)
+    assert len(result[4])==20 and all(p['cost']==50_000 for p in result[4].values())
+    assert set(result[4])=={str(i) for i in range(5,25)}
+    assert result[0][-1]['cash']==0
+
+
+def test_weight_uses_new_signal_nav_and_does_not_rebalance_old():
+    ds=['2019-11-29','2019-12-31','2020-01-08','2020-01-09','2020-01-15','2020-01-16']
+    prices={s:{d:dict(open=100,close=100,Trading_Volume=1) for d in ds} for s in ['A','B']}
+    prices['A']['2020-01-15']['close']=200
+    prices['B']['2020-01-16'].update(open=300,close=300)
+    tables={'2019-11-29':{'A':row(.1),'B':row(.1)},'2019-12-31':{'A':row(.1),'B':row(.1)},'2020-01-08':{'A':row(.2)},'2020-01-15':{'A':row(.2),'B':row(.3)}}
+    result=simulate_weekly(prices,{},ds,tables,False,equity_allocation=True,position_weight=.05)
+    target=(950_000+50_000/1.003*2)*.05
+    assert result[4]['A']['cost']==50_000
+    assert abs(result[4]['B']['cost']-target)<1e-8
