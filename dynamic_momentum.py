@@ -72,7 +72,7 @@ def decisions(current,previous,older,held):
     return buys,exits
 
 
-def simulate(prices,events,calendar,tables,fee=.003,initial_capital=1.,ticket=None,max_positions=None):
+def simulate(prices,events,calendar,tables,fee=.003,initial_capital=1.,ticket=None,max_positions=None,stop_loss=None):
     cash=initial_capital;held={};trades=[];nav=[];orders=[];pending={};buy_plan=[]
     months=sorted(tables);prev={m:months[i-1] if i else None for i,m in enumerate(months)}
     warmup=[m for m in months if m<'2020-01-01']
@@ -88,7 +88,7 @@ def simulate(prices,events,calendar,tables,fee=.003,initial_capital=1.,ticket=No
             r=prices[sid].get(day,{})
             if r.get('open',0)>0 and r.get('Trading_Volume',0)>0:
                 p=held.pop(sid);proceeds=p['shares']*r['open']*(1-fee);cash+=proceeds
-                trades.append(dict(stock_id=sid,entry=p['entry'],exit=day,reason=reason,return_net=proceeds/p['cost']-1,days=(date.fromisoformat(day)-date.fromisoformat(p['entry'])).days,cost=p['cost'],proceeds=proceeds))
+                trades.append(dict(stock_id=sid,entry=p['entry'],exit=day,reason=reason,return_net=proceeds/p['cost']-1,days=(date.fromisoformat(day)-date.fromisoformat(p['entry'])).days,cost=p['cost'],proceeds=proceeds,stop_signal_date=p.get('stop_signal_date','')))
                 del pending[sid]
         budget=ticket if ticket is not None else (cash/len(buy_plan) if buy_plan else 0)
         for sid in buy_plan:
@@ -114,7 +114,15 @@ def simulate(prices,events,calendar,tables,fee=.003,initial_capital=1.,ticket=No
         if day in tables:
             pm=prev[day];om=prev.get(pm)
             buy_plan,sell=decisions(tables[day],tables.get(pm,{}),tables.get(om,{}),held)
-            pending.update(sell)
+            for sid,reason in sell.items():pending.setdefault(sid,reason)
+        if stop_loss is not None:
+            for sid,p in held.items():
+                r=prices[sid].get(day,{})
+                if r.get('close',0)>0 and r.get('Trading_Volume',0)>0:
+                    liquidation_value=p['shares']*r['close']*(1-fee)
+                    if liquidation_value < p['cost']*(1-stop_loss):
+                        pending[sid]='stop_loss'
+                        p.setdefault('stop_signal_date',day)
     return nav,trades,orders,held,pending
 
 
@@ -129,8 +137,11 @@ def metrics(nav,key,initial_capital=1.):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fixed10',action='store_true',help='100萬元、最多10檔、每筆含成本10萬元；不足10萬元不買')
+    parser.add_argument('--stop-loss',type=float,default=None,help='每日收盤淨清算虧損門檻，例如0.10；次交易日開盤出場')
     args=parser.parse_args()
+    if args.stop_loss is not None and not 0<args.stop_loss<1:parser.error('--stop-loss 必須介於0與1')
     allocation=dict(initial_capital=1_000_000.,ticket=100_000.,max_positions=10) if args.fixed10 else {}
+    if args.stop_loss is not None:allocation['stop_loss']=args.stop_loss
     initial=allocation.get('initial_capital',1.)
     prices,events,calendar,index,fingerprint,excluded=load_data()
     ends={d[:7]:d for d in calendar};tables={}
@@ -146,7 +157,7 @@ def main():
     prefix_nav=simulate({s:{d:r for d,r in rs.items() if d<=check} for s,rs in prices.items()},{k:v for k,v in events.items() if k[1]<=check},[d for d in calendar if d<=check],{d:t for d,t in tables.items() if d<=check},**allocation)[0]
     assert prefix_nav==[r for r in nav if r['date']<=check]
     sensitivity={str(f):metrics(simulate(prices,events,calendar,tables,fee=f,**allocation)[0],'nav_stale',initial) for f in (.0015,.006)}
-    out=Path('backtest/momentum_dynamic_fixed10' if args.fixed10 else 'backtest/momentum_dynamic');out.mkdir(exist_ok=True)
+    out=Path(('backtest/momentum_dynamic_fixed10' if args.fixed10 else 'backtest/momentum_dynamic')+(f'_stop{args.stop_loss:g}' if args.stop_loss is not None else ''));out.mkdir(exist_ok=True)
     signals=[dict(day=d,stock_id=s,**v) for d,t in tables.items() for s,v in t.items()]
     for name,rows in [('nav',nav),('trades',trades),('orders',orders),('signals',signals)]:
         with (out/(name+'.csv')).open('w',encoding='utf-8-sig',newline='') as f:

@@ -109,3 +109,39 @@ def test_locked_holding_counts_against_limit_and_profit_ticket_stays_fixed():
     prices['A'][days[-1]]=dict(open=200,close=200,Trading_Volume=1)
     nav,trades,orders,held,pending=simulate(prices,{},days,tables,initial_capital=200_000,ticket=100_000,max_positions=1)
     assert set(held)=={'B'} and held['B']['cost']==100_000 and nav[-1]['cash']>190_000
+
+
+def stop_fixture(closes,opens=None):
+    days=['2020-01-02','2020-01-03','2020-01-06','2020-01-07'][:len(closes)]
+    prices={'A':{d:dict(open=(opens or closes)[i],close=v,Trading_Volume=1) for i,(d,v) in enumerate(zip(days,closes))}}
+    tables={'2019-11-29':{'A':row(.1)},'2019-12-31':{'A':row(.2)}}
+    return prices,days,tables
+
+
+def test_stop_strict_threshold_and_next_open_gap():
+    prices,days,tables=stop_fixture([100,90,89,75],[100,90,89,70])
+    nav,trades,orders,held,pending=simulate(prices,{},days,tables,fee=0,stop_loss=.1)
+    assert len(trades)==1 and trades[0]['stop_signal_date']==days[2]
+    assert trades[0]['exit']==days[3] and trades[0]['reason']=='stop_loss'
+    assert abs(trades[0]['return_net']+.3)<1e-12
+
+
+def test_stop_pending_not_cancelled_by_recovery_or_month_signal():
+    prices,days,tables=stop_fixture([100,80,95,100],[100,80,0,95])
+    tables[days[2]]={'A':row(-.1)}
+    nav,trades,orders,held,pending=simulate(prices,{},days,tables,fee=0,stop_loss=.1)
+    assert trades[0]['exit']==days[3] and trades[0]['reason']=='stop_loss'
+    assert nav[2]['cash']==0 and nav[2]['positions']==1
+
+
+def test_stop_accounts_for_costs_and_not_future_open():
+    prices,days,tables=stop_fixture([100,90.5,80])
+    nav,trades,orders,held,pending=simulate(prices,{},days,tables,stop_loss=.1)
+    assert trades[0]['stop_signal_date']==days[1]
+    assert trades[0]['exit']==days[2]
+
+
+def test_split_does_not_false_trigger_stop():
+    prices,days,tables=stop_fixture([100,50,50])
+    nav,trades,orders,held,pending=simulate(prices,{('A',days[1]):2},days,tables,fee=0,stop_loss=.1)
+    assert not trades and not pending
