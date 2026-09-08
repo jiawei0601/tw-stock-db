@@ -29,6 +29,10 @@ def _text(value):
         return "否"
     if value is True:
         return "是"
+    if value == "external":
+        return "原有非策略"
+    if value == "unassigned":
+        return "待分類"
     return str(value)
 
 
@@ -87,6 +91,9 @@ def render_report(snapshot: dict) -> str:
         "無查詢錯誤",
     )
     imported = "是" if snapshot.get("strategy_imported") is True else "否"
+    notice = ('使用者已確認：本次快照全部庫存與歷史成交均為原有非策略部位；動能策略仍為50萬元現金、尚未建倉。此確認只適用本次快照，未來新成交仍須核對歸屬。'
+              if snapshot.get('classification') == 'external_all_user_confirmed'
+              else '所有庫存與成交均為「待分類」。本報告不代表任何項目屬於策略持股。')
     return f'''<!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -107,7 +114,7 @@ table{{border-collapse:collapse;width:100%;white-space:nowrap}}th,td{{padding:8p
 <div><b>查詢範圍</b>{_cell(snapshot.get("start"))} ～ {_cell(snapshot.get("end"))}</div>
 <div><b>完整性狀態</b><span class="badge {status_class}">{escape(status_label)}</span></div>
 <div><b>已匯入策略帳本</b>{imported}</div>
-</div><div class="notice">所有庫存與成交均為「待分類」。本報告不代表任何項目屬於策略持股；成交費用與交易稅未知，且缺少的庫存欄位應視為未知，不能當作 0。</div></section>
+</div><div class="notice">{escape(notice)} 成交費用與交易稅未知，且缺少的庫存欄位應視為未知，不能當作 0。</div></section>
 {''.join(account_sections)}
 <section class="account"><h2>查詢錯誤</h2>{error_rows}</section>
 </main></body></html>'''

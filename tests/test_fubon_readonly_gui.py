@@ -6,6 +6,14 @@ from types import SimpleNamespace
 import pytest
 
 
+def test_explicit_external_classification_is_snapshot_scoped():
+    from fubon_readonly_report import render_report
+    html = render_report(dict(status='complete', classification='external_all_user_confirmed', accounts=[]))
+    assert '使用者已確認' in html
+    assert '未來新成交仍須核對歸屬' in html
+    assert '所有庫存與成交均為「待分類」' not in html
+
+
 def setup_gui(monkeypatch, tmp_path, login_ok=True):
     import fubon_readonly_gui as gui
     calls = []
