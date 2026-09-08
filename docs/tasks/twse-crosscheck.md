@@ -25,7 +25,7 @@
 
 ### 3. FinMind 空回應補洞（約 350 次請求）
 - 從 status.json／responses 找出 `TaiwanStockPrice` 回空的 92 檔：用官方端點各抓 2020-06 與 2023-06 兩個月（下市股改抓下市前一年的一個月，下市日查 `TaiwanStockDelisting` 回應）。判定三類：`official_has_data`（FinMind 缺漏，寫入 `pit_gap_prices.csv` 並把官方資料存成 `data/momentum_pit/official_fill/prices_<stock>.json`）、`no_data_both`（可能非普通股或期間未上市）、`endpoint_error`。
-- 除權息回空的 170 檔：用區間端點一次拉 2019-01-01 至 2026-09-07 的**全市場**除權息表（上市按月分 92 次區間、上櫃同樣按月），本地過濾這 170 檔，判定 `official_has_events`／`no_events_both`。把全市場表存成 `data/momentum_pit/official_fill/exright_twse.csv` 與 `exright_tpex.csv`（這兩張表本身就是第二來源，之後可整批比對）。
+- 除權息回空的 286 檔：用區間端點一次拉 2019-01-01 至 2026-09-07 的**全市場**除權息表（上市按月分 92 次區間、上櫃同樣按月），本地過濾這 170 檔，判定 `official_has_events`／`no_events_both`。把全市場表存成 `data/momentum_pit/official_fill/exright_twse.csv` 與 `exright_tpex.csv`（這兩張表本身就是第二來源，之後可整批比對）。
 - 股利政策與減資回空的檔數若也大量（看 status.json），只報數量與抽 10 檔查證，不逐檔補。
 
 ### 4. 產出
