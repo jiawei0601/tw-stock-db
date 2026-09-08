@@ -1,5 +1,14 @@
 # HANDOFF
 
+## 最新：50萬元動能30%已部署Hetzner/TG（Codex，2026-09-08）
+
+- 策略唯一規格 `docs/momentum30-live-strategy.md`，遠端 `/home/chang/tw-momentum30/STRATEGY.md`。固定引擎 `live_momentum.py`＋原signal_table；暖機種子與實際帳戶均在遠端live_data，不進git。官方TWSE/TPEx增量更新已成功取得9/8，解開先前FinMind額度阻礙，但公司行動仍未完整自動對帳。
+- Hermes job `827e462e3e63`：Asia/Taipei平日16:00，週三完整操作、其他日待賣／資料警報；固定no-agent腳本 `~/.hermes/scripts/momentum30-notify.py` 直接TG，不代下單。原Hermes其他SOP不變。本地Codex提醒50已PAUSED避免重複。
+- TG啟用測試 `5445b09364e8` 於15:39:59成功完成且無delivery error，已自動停用。遠端今日真實執行／編譯通過，本地100項相關測試綠。
+- 真實成交透過已部署Hermes技能 `~/.hermes/skills/finance/momentum30/SKILL.md`，由使用者回報唯一ID、方向、代號、股數、均價、實際費稅與日期後呼叫fill命令。候選不自動記成交；初始50萬元、0持股。帳本備份、防重複、現金/超賣檢查、待賣保存及錯過日期重播已加入。
+- 明示與回測差異：10:00首日高點僅成交與收盤下界、整數股、尚未成交賣款不預支；股利/配股/分割仍需券商資料人工核對。不要宣稱實盘已完整含息或保證參數績效。
+- 本輪提交以git log「部署動能30%固定通知至Hetzner並以實際成交維護帳戶」查找。保留其他代理4份backtest變更；本輪未提交其檔案。下一步使用者週四成交回報後入帳、持續核實公司行動。
+
 ## 最新：50萬元現金策略候選预覽（Codex，2026-09-08）
 
 - 使用者要實際買賣標的，已確認50萬元全部可用現金；按新策略帳戶每檔2.5萬元。既有持股未提供，不可虛構賣單。
