@@ -1,5 +1,13 @@
 # HANDOFF
 
+## 最新：Hetzner每日庫存接線待API Key修正（Codex，2026-09-08）
+
+- 使用者授權Hetzner每日持倉監控自動抓券商庫存。獨立Linux Python3.12+Neo2.3.0已裝 `/home/chang/fubon-monitor`；唯讀runner、SSH秘密接收與前置script已部署，37項測試綠。詳見 `docs/fubon-hetzner-daily.md`、`docs/tasks/fubon-daily-inventory-contract.md`。
+- 使用者已在本機GUI輸入並保存設定到Hetzner，private0700、檔案0600；**真實APIKey登入失敗**，一次診斷確認券商回「APIKEY尚未申請」，未取得遠端庫存。已停止重試、詢問使用者是否輸入完整Secret Key，待回覆。秘密不可讀出或貼到聊天。
+- `ad2b97bcefc8`仍原來平日14:00Notion股數版，**尚未啟用富邦前置script**。只有成功從Hetzner驗證當日庫存後才執行已部署 `fubon_attach_daily.py`（要求20分鐘內成功狀態、備份原job、Hermes CLI edit），再驗證交付。其他排程未改。
+- 既有日報有「觸發訊號即改Notion已出清」與90天算MA120問題；待接線的新prompt已修正，原SOP參數不變，新增股數差異／新部位待核對，不併入50萬元策略。
+- 本機安全設定GUI `fubon_remote_setup.py`，狀態 `live_data/fubon/remote-setup-status.json`（目前remote_validation_failed）。若使用者改Key需再開視窗；密碼不保存在本機。前次commit66e84c7；本輪不碰其他agent未提交檔。
+
 ## 最新：富邦唯讀對帳真實查詢成功（Codex，2026-09-08）
 
 - 使用者要求繼續券商同步，明確確認「有其他持股，先分開對帳」。因此所有券商成交待分類、費稅未知，不推定為策略持股，不改 50 萬策略帳本或遠端系統。
