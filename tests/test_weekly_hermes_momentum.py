@@ -300,3 +300,22 @@ def test_invalid_high_is_not_silently_replaced():
     prices,ds,tables=peak_scenario()
     del prices['A']['2020-01-09']['max']
     with pytest.raises(ValueError,match='最高價'):simulate_weekly(prices,{},ds,tables,False,peak_stop=.1)
+
+
+def test_diagnostic_high_is_local_and_leaves_source_unchanged():
+    from weekly_hermes_momentum import diagnostic_high_envelope
+    source={'A':{'2020-01-01':dict(open=147.2,max=147,close=144.5,Trading_Volume=1),
+                 '2020-01-02':dict(open=150,max=200,close=180,Trading_Volume=1)}}
+    adjusted,audit=diagnostic_high_envelope(source)
+    assert source['A']['2020-01-01']['max']==147
+    assert adjusted['A']['2020-01-01']['max']==147.2
+    assert len(audit)==1 and audit[0]['diagnostic_high']==147.2
+    truncated,_=diagnostic_high_envelope({'A':{'2020-01-01':source['A']['2020-01-01']}})
+    assert truncated['A']['2020-01-01']==adjusted['A']['2020-01-01']
+
+
+def test_diagnostic_missing_high_uses_known_same_day_prices():
+    from weekly_hermes_momentum import diagnostic_high_envelope
+    adjusted,audit=diagnostic_high_envelope({'A':{'2020-01-01':dict(open=100,close=110,Trading_Volume=1)}})
+    assert adjusted['A']['2020-01-01']['max']==110
+    assert audit[0]['raw_high'] is None

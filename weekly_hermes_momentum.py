@@ -142,17 +142,37 @@ def summarize(result):
     return dict(start=nav[0]['date'],end=nav[-1]['date'],first_fill=next((r['date'] for r in orders if r['filled']),None),ending_equity=nav[-1]['nav_stale'],ending_cash=nav[-1]['cash'],stale_scenario=metrics(nav,'nav_stale',1_000_000),zero_scenario=metrics(nav,'nav_missing_zero',1_000_000),closed_roundtrips=len(trades),sell_legs=len(legs),win_rate=statistics.mean(t['return_net']>0 for t in trades) if trades else None,mean_holding_days=statistics.mean(t['days'] for t in trades) if trades else None,mean_positions=statistics.mean(r['positions'] for r in nav),max_positions=max(r['positions'] for r in nav),mean_cash_fraction=statistics.mean(r['cash']/r['nav_stale'] for r in nav),missing_mark_days=sum(r['missing_marks']>0 for r in nav),open_positions=len(held),pending=pending,yearly=yearly,exit_legs_by_reason={s:sum(t['reason']==s for t in legs) for s in sorted({t['reason'] for t in legs})})
 
 
+def diagnostic_high_envelope(prices):
+    """診斷假設：僅用當日開高收建立高點下界；不改原始資料。"""
+    adjusted={};audit=[]
+    for sid,rows in prices.items():
+        adjusted[sid]=dict(rows)
+        for day,r in rows.items():
+            if r.get('close',0)<=0 or r.get('Trading_Volume',0)<=0:continue
+            high=r.get('max')
+            valid_high=isinstance(high,(int,float)) and math.isfinite(high) and high>0
+            effective=max(r.get('open',0),r['close'],high if valid_high else 0)
+            if not valid_high or high<effective:
+                adjusted[sid][day]={**r,'max':effective}
+                audit.append(dict(stock_id=sid,date=day,raw_high=high,open=r.get('open'),close=r['close'],diagnostic_high=effective))
+    return adjusted,audit
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--equity-allocation',action='store_true',help='無檔數上限，新倉按訊號日淨值等權目標、現金同比縮小')
     parser.add_argument('--momentum-exit',action='store_true',help='月底動能出場＋每日淨虧損10%停損，取消Hermes分批與90天期限')
     parser.add_argument('--position-weight',type=float,default=None,help='每筆新倉占訊號日淨值比例，例如0.05；不足整筆金額不買')
     parser.add_argument('--peak-stop',type=float,default=None,help='收盤較持有後最高成交價回落門檻，例如0.10；取代成本停損')
+    parser.add_argument('--diagnostic-high-envelope',action='store_true',help='明確以當日開高收最大值暫代矛盾高價，逐筆稽核；非認證修復')
     args=parser.parse_args()
+    if args.diagnostic_high_envelope and args.peak_stop is None:parser.error('診斷高價需搭配 --peak-stop')
     if args.peak_stop is not None and not 0<args.peak_stop<1:parser.error('--peak-stop 必須介於0與1')
     if args.position_weight is not None and not 0<args.position_weight<=1:parser.error('--position-weight 必須介於0與1')
     exit_options=dict(trailing=not args.momentum_exit,observation_days=None if args.momentum_exit else 90,equity_allocation=args.equity_allocation,position_weight=args.position_weight,peak_stop=args.peak_stop)
     prices,events,calendar,index,fingerprint,excluded=load_data()
+    high_audit=[]
+    if args.diagnostic_high_envelope:prices,high_audit=diagnostic_high_envelope(prices)
     ends={d[:7]:d for d in calendar}
     valid={s:sorted(d for d,r in rows.items() if r.get('close',0)>0 and r.get('Trading_Volume',0)>0) for s,rows in prices.items()}
     tables={}
@@ -174,12 +194,18 @@ def main():
     assert prefix[0]==[r for r in result[0] if r['date']<=check]
     assert prefix[2]==[r for r in result[2] if r['exit']<=check]
     out=Path(('backtest/momentum_weekly_hermes_equity' if args.equity_allocation else 'backtest/momentum_weekly_hermes')+('_momentum_exit' if args.momentum_exit else '')+(f'_weight{args.position_weight:g}' if args.position_weight is not None else '')+(f'_peak{args.peak_stop:g}' if args.peak_stop is not None else ''));out.mkdir(exist_ok=True)
+    if args.diagnostic_high_envelope:
+        out=out.with_name(out.name+'_diagnostic');out.mkdir(exist_ok=True)
+        (out/'high_price_audit.json').write_text(json.dumps(high_audit,ensure_ascii=False,indent=2),encoding='utf-8')
     for name,rows in zip(['nav','roundtrips','sell_legs','orders'],result[:4]):
         with (out/(name+'.csv')).open('w',encoding='utf-8-sig',newline='') as f:
             if rows:
                 w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
     (out/'holdings.json').write_text(json.dumps(result[4],default=lambda x:sorted(x),indent=2),encoding='utf-8')
     summary=dict(exit_options=exit_options,equity_allocation=args.equity_allocation,certification='PRICE_PATH_DIAGNOSTIC_ONLY' if args.peak_stop is not None else 'UNVERIFIED_PRICE_EXPLORATION',fingerprint=fingerprint,excluded_dates=excluded,prefix_invariance=True,weekly_stop_only=summarize(baseline),**{'weekly_momentum_exit' if args.momentum_exit else 'weekly_hermes90':summarize(result)})
+    summary['high_price_policy']='same_day_ohlc_envelope_diagnostic' if args.diagnostic_high_envelope else 'strict'
+    summary['high_price_adjusted_rows']=len(high_audit)
+    summary['limitations']=['股票股利、現金股利與部分公司行動未完整入帳，可能誤觸停損並扭曲後續資金路徑','歷史股票池完整性未認證；截斷測試通過不等於資料已通過時點認證']
     (out/'result.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(summary,ensure_ascii=False,indent=2))
 
