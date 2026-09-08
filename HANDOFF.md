@@ -1,5 +1,11 @@
 # HANDOFF
 
+## 最新：本機富邦登入待安全輸入／PFX診斷（Codex，2026-09-08）
+
+- 使用者要求設定登入並驗證憑證。已建 `fubon_login_check.py` 本機Tk遮蔽輸入，使用Python3.10+Neo2.2.6；不存密碼、不上傳憑證、不下單、不自動重試券商登入。
+- 舊視窗PFX讀取ValueError，使用者提供錯誤截圖。已加Windows原生PFX備援及HRESULT辨識，103項相關測試綠。新版視窗已啟動，結果檔 `live_data/fubon-login-check.json` 最新為awaiting_local_input；後續接手先讀此檔，不把尚待輸入當登入成功。
+- Windows憑證庫日期尚有效不等於PFX已解密或未撤銷。首次PFX錯誤還沒送券商登入；原始原因尚待同檔雙讀取確認。詳見 `docs/fubon-local-installation.md`。密碼不能要求貼到TG／對話。
+
 ## 最新：富邦API已安裝查核（Codex，2026-09-08）
 
 - 使用者確認富邦API已開通，但忘記安裝位置。查明Python3.10與Anaconda皆有Fubon Neo2.2.6，兩者SDK import通過；預設Hermes Python沒有SDK，不要誤認整台未安裝。
