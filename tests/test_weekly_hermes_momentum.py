@@ -247,3 +247,56 @@ def test_weight_uses_new_signal_nav_and_does_not_rebalance_old():
     target=(950_000+50_000/1.003*2)*.05
     assert result[4]['A']['cost']==50_000
     assert abs(result[4]['B']['cost']-target)<1e-8
+
+
+def peak_scenario():
+    prices,ds,tables=scenario()
+    for d,r in prices['A'].items():r.update(open=100,close=100,max=100)
+    return prices,ds,tables
+
+
+def test_peak_stop_protects_profit_and_executes_next_open():
+    prices,ds,tables=peak_scenario()
+    prices['A']['2020-01-09'].update(max=150,close=150)
+    prices['A']['2020-01-10'].update(open=140,max=145,close=134)
+    prices['A']['2020-01-13'].update(open=120,max=125,close=123)
+    result=simulate_weekly(prices,{},ds,tables,False,equity_allocation=True,position_weight=.05,peak_stop=.1)
+    leg=result[2][0]
+    assert leg['signal_date']=='2020-01-10' and leg['exit']=='2020-01-13'
+    assert leg['reason']=='trailing_stop' and leg['signal_peak']==150 and leg['signal_stop_level']==135
+    assert leg['exit_open']==120 and leg['pnl']>0
+
+
+def test_peak_stop_strict_and_high_never_decreases():
+    prices,ds,tables=peak_scenario()
+    prices['A']['2020-01-09'].update(max=150,close=150)
+    prices['A']['2020-01-10'].update(open=140,max=140,close=135)
+    prices['A']['2020-01-13'].update(open=135,max=136,close=134)
+    result=simulate_weekly(prices,{},ds,tables,False,peak_stop=.1)
+    assert result[2][0]['signal_date']=='2020-01-13' and result[2][0]['signal_peak']==150
+
+
+def test_entry_day_high_can_trigger_but_not_same_day_sale():
+    prices,ds,tables=peak_scenario()
+    prices['A']['2020-01-09'].update(max=120,close=100)
+    result=simulate_weekly(prices,{},ds,tables,False,peak_stop=.1)
+    assert result[2][0]['signal_date']=='2020-01-09' and result[2][0]['exit']=='2020-01-10'
+
+
+def test_split_rescales_peak_and_future_high_does_not_trigger_past():
+    prices,ds,tables=peak_scenario()
+    prices['A']['2020-01-09'].update(max=150,close=150)
+    for d in ['2020-01-10','2020-01-13','2020-01-14']:prices['A'][d].update(open=75,max=75,close=75)
+    result=simulate_weekly(prices,{('A','2020-01-10'):2},ds,tables,False,peak_stop=.1)
+    assert not result[2] and result[4]['A']['high_water']==75
+    prices['A']['2020-01-14']['max']=1000
+    modified=simulate_weekly(prices,{('A','2020-01-10'):2},ds,tables,False,peak_stop=.1)
+    assert [r for r in modified[0] if r['date']<'2020-01-14']==[r for r in result[0] if r['date']<'2020-01-14']
+    assert not modified[2] and modified[5]['A']['signal']=='2020-01-14'
+
+
+def test_invalid_high_is_not_silently_replaced():
+    import pytest
+    prices,ds,tables=peak_scenario()
+    del prices['A']['2020-01-09']['max']
+    with pytest.raises(ValueError,match='最高價'):simulate_weekly(prices,{},ds,tables,False,peak_stop=.1)

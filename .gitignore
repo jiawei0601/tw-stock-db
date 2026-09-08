@@ -52,3 +52,5 @@ backtest/momentum_weekly_hermes_equity/
 backtest/momentum_weekly_hermes_equity_momentum_exit/
 
 backtest/momentum_weekly_hermes_equity_momentum_exit_weight*/
+
+backtest/momentum_weekly_hermes_equity_momentum_exit_weight*_peak*/

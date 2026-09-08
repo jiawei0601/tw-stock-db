@@ -33,7 +33,7 @@ def hermes_stages(position,close,averages):
     return [n for n in STAGES if n>max(position['done'],default=0) and n in averages and close<averages[n]]
 
 
-def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,observation_days=None,*,momentum_exit=None,net_stop=None,cost_floor=None,ma_exit=None,equity_allocation=False,position_weight=None):
+def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,observation_days=None,*,momentum_exit=None,net_stop=None,cost_floor=None,ma_exit=None,equity_allocation=False,position_weight=None,peak_stop=None):
     momentum_exit=(not trailing) if momentum_exit is None else momentum_exit
     net_stop=(not trailing) if net_stop is None else net_stop
     cost_floor=trailing if cost_floor is None else cost_floor
@@ -46,6 +46,7 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
         for sid,p in held.items():
             ratio=events.get((sid,day),1.)
             p['original_shares']*=ratio;p['mark']/=ratio
+            p['high_water']/=ratio
         if observation_days is not None:
             for sid,p in held.items():
                 deadline=(date.fromisoformat(p['entry'])+timedelta(days=observation_days)).isoformat()
@@ -59,7 +60,7 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
             proceeds=p['original_shares']*fraction*r['open']*.997
             cash+=proceeds;p['proceeds']+=proceeds;p['remaining']-=fraction
             p['done'].update(order['stages'])
-            legs.append(dict(stock_id=sid,entry=p['entry'],signal_date=order['signal'],exit=day,reason=order['reason'],fraction_original=fraction,cost=p['cost']*fraction,proceeds=proceeds,pnl=proceeds-p['cost']*fraction,exit_open=r['open']))
+            legs.append(dict(stock_id=sid,entry=p['entry'],signal_date=order['signal'],exit=day,reason=order['reason'],fraction_original=fraction,cost=p['cost']*fraction,proceeds=proceeds,pnl=proceeds-p['cost']*fraction,exit_open=r['open'],signal_peak=p.get('signal_peak'),signal_stop_level=p.get('signal_stop_level'),signal_close=p.get('signal_close')))
             del pending[sid]
             if p['remaining']<1e-9:
                 roundtrips.append(dict(stock_id=sid,entry=p['entry'],exit=day,cost=p['cost'],proceeds=p['proceeds'],return_net=p['proceeds']/p['cost']-1,days=(date.fromisoformat(day)-date.fromisoformat(p['entry'])).days,last_reason=order['reason']))
@@ -71,7 +72,7 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
             orders.append(dict(date=day,stock_id=sid,filled=filled,budget=budget))
             if filled:
                 cash-=budget
-                held[sid]=dict(entry=day,cost=budget,original_shares=budget/(r['open']*1.003),remaining=1.,done=set(),mark=r['open'],proceeds=0.,ever20=False)
+                held[sid]=dict(entry=day,cost=budget,original_shares=budget/(r['open']*1.003),remaining=1.,done=set(),mark=r['open'],proceeds=0.,ever20=False,high_water=r['open'])
         buy_plan=[];cash=max(cash,0.)
         value=zero=cash;missing=0
         for sid,p in held.items():
@@ -103,11 +104,21 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
             # SOP thresholds use raw entry cost price; transaction costs affect P&L only.
             price_value=p['original_shares']*r['close']
             basis=p['cost']/1.003
-            breach=(price_value < basis) if cost_floor and p['ever20'] else ((price_value*.997 < p['cost']*.90) if net_stop else (price_value < basis*.90))
-            if breach:
+            if peak_stop is not None:
+                high=r.get('max')
+                if high is None or high<max(r.get('open',0),r['close']):
+                    raise ValueError(f'缺少有效當日最高價：{sid}/{day}')
+                p['high_water']=max(p['high_water'],high)
+                breach=r['close'] < p['high_water']*(1-peak_stop)
+                reason='trailing_stop'
+            else:
+                breach=(price_value < basis) if cost_floor and p['ever20'] else ((price_value*.997 < p['cost']*.90) if net_stop else (price_value < basis*.90))
                 reason='cost_floor' if cost_floor and p['ever20'] else 'stop_loss'
+            if breach:
                 if pending.get(sid,{}).get('reason')!=reason:
                     pending[sid]=dict(full=True,stages=[],reason=reason,signal=day)
+                    if peak_stop is not None:
+                        p.update(signal_peak=p['high_water'],signal_stop_level=p['high_water']*(1-peak_stop),signal_close=r['close'])
                 continue
             if deadline is not None and day>=deadline and not p['ever20'] and not pending.get(sid,{}).get('full'):
                 pending[sid]=dict(full=True,stages=[],reason='observation_90',signal=day)
@@ -136,9 +147,11 @@ def main():
     parser.add_argument('--equity-allocation',action='store_true',help='無檔數上限，新倉按訊號日淨值等權目標、現金同比縮小')
     parser.add_argument('--momentum-exit',action='store_true',help='月底動能出場＋每日淨虧損10%停損，取消Hermes分批與90天期限')
     parser.add_argument('--position-weight',type=float,default=None,help='每筆新倉占訊號日淨值比例，例如0.05；不足整筆金額不買')
+    parser.add_argument('--peak-stop',type=float,default=None,help='收盤較持有後最高成交價回落門檻，例如0.10；取代成本停損')
     args=parser.parse_args()
+    if args.peak_stop is not None and not 0<args.peak_stop<1:parser.error('--peak-stop 必須介於0與1')
     if args.position_weight is not None and not 0<args.position_weight<=1:parser.error('--position-weight 必須介於0與1')
-    exit_options=dict(trailing=not args.momentum_exit,observation_days=None if args.momentum_exit else 90,equity_allocation=args.equity_allocation,position_weight=args.position_weight)
+    exit_options=dict(trailing=not args.momentum_exit,observation_days=None if args.momentum_exit else 90,equity_allocation=args.equity_allocation,position_weight=args.position_weight,peak_stop=args.peak_stop)
     prices,events,calendar,index,fingerprint,excluded=load_data()
     ends={d[:7]:d for d in calendar}
     valid={s:sorted(d for d,r in rows.items() if r.get('close',0)>0 and r.get('Trading_Volume',0)>0) for s,rows in prices.items()}
@@ -160,13 +173,13 @@ def main():
     prefix=simulate_weekly(prefix_prices,prefix_events,prefix_calendar,prefix_tables,**exit_options)
     assert prefix[0]==[r for r in result[0] if r['date']<=check]
     assert prefix[2]==[r for r in result[2] if r['exit']<=check]
-    out=Path(('backtest/momentum_weekly_hermes_equity' if args.equity_allocation else 'backtest/momentum_weekly_hermes')+('_momentum_exit' if args.momentum_exit else '')+(f'_weight{args.position_weight:g}' if args.position_weight is not None else ''));out.mkdir(exist_ok=True)
+    out=Path(('backtest/momentum_weekly_hermes_equity' if args.equity_allocation else 'backtest/momentum_weekly_hermes')+('_momentum_exit' if args.momentum_exit else '')+(f'_weight{args.position_weight:g}' if args.position_weight is not None else '')+(f'_peak{args.peak_stop:g}' if args.peak_stop is not None else ''));out.mkdir(exist_ok=True)
     for name,rows in zip(['nav','roundtrips','sell_legs','orders'],result[:4]):
         with (out/(name+'.csv')).open('w',encoding='utf-8-sig',newline='') as f:
             if rows:
                 w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
     (out/'holdings.json').write_text(json.dumps(result[4],default=lambda x:sorted(x),indent=2),encoding='utf-8')
-    summary=dict(exit_options=exit_options,equity_allocation=args.equity_allocation,certification='UNVERIFIED_PRICE_EXPLORATION',fingerprint=fingerprint,excluded_dates=excluded,prefix_invariance=True,weekly_stop_only=summarize(baseline),**{'weekly_momentum_exit' if args.momentum_exit else 'weekly_hermes90':summarize(result)})
+    summary=dict(exit_options=exit_options,equity_allocation=args.equity_allocation,certification='PRICE_PATH_DIAGNOSTIC_ONLY' if args.peak_stop is not None else 'UNVERIFIED_PRICE_EXPLORATION',fingerprint=fingerprint,excluded_dates=excluded,prefix_invariance=True,weekly_stop_only=summarize(baseline),**{'weekly_momentum_exit' if args.momentum_exit else 'weekly_hermes90':summarize(result)})
     (out/'result.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(summary,ensure_ascii=False,indent=2))
 
