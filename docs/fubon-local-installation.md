@@ -20,6 +20,14 @@
 
 ## 本機登入與PFX驗證工具
 
+2026-09-08 後續：使用者已匯出新 p12（Downloads，2790 bytes，完整路徑含身分資料故不記錄）。已安裝獨立環境 `C:\Users\chang\AppData\Local\FubonApiCheck`，Neo 2.3.0 載入通過；網頁匯出憑證改用此環境執行，不使用下方舊版命令。啟動命令：
+
+```powershell
+& 'C:\Users\chang\AppData\Local\FubonApiCheck\Scripts\pythonw.exe' .\fubon_login_check.py
+```
+
+啟動後按「選檔」選新 p12（預填仍為舊 CAFubon 檔案），密碼在本機視窗輸入。新憑證尚未解密或完成券商登入；檔名日期不是有效性證據。本輪 3 項登入工具測試通過。
+
 使用者已授權設定登入及檢查有效性。`fubon_login_check.py`為Tk本機遮蔽輸入視窗，使用已安裝2.2.6的Python3.10；啟動：
 
 ```powershell
