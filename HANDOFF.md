@@ -171,4 +171,5 @@ GitHub Pages）。
 
 - 2026-09-08 01:40 第二輪有效性修復完成（agy 01:07 產出、sonnet 驗收 request_changes 三項皆為揭露／資料品質，補揭露後納入，73 測試綠）。**修復後可引用數字**（6 個月、還原價、T+1、父子共同月、6 月區塊 bootstrap）：D2→D3 品質排雷 -0.60%（CI 跨 0，不成立）；D3→D5 營收為正 +2.84%（CI [+1.1, +4.1]，成立）；C1→MOM_12_1 全池原始 12−1 動能 +3.55%（CI [+0.7, +6.6]，成立）；C1→C1_12_1 −0.08%（lookback 無差）→ 差異來自「全池選股」而非「拉長視窗」。執行面：E0（T+1）與 E1b 等拉回幾乎打平（−0.11／+0.36），出場規則在再投資口徑下少賺 2–4 個百分點而非 10，「訊號日買最好、不出場最好」改為「差異不大、無簡單規則明顯勝出」。待辦：fm_corporate_events 抓取端編碼、5305 還原價、清理 compute_holding_return_adjusted、日排程 daily_prices 落後、Codex 措辭建議其餘項目。
 
+- 2026-09-08 §9.1 Codex 主力試行第一支：第三輪「第二輪數字重核＋殘項修復」派 Codex exec，工單 `docs/tasks/backtest-validity-3-recheck.md`，回報 `docs/tasks/reports/backtest-validity-3-recheck-report.md`。Codex 實作不 commit，Claude Code checkpoint 後審。進行中。
 - 2026-09-08 02:10 **更正**：FinMind TaiwanStockPriceAdj 需 Sponsor 等級，免費帳號 400；agy 第二輪的 `fm_price_adj_daily` 實際是原價＋已確認分割事件還原（抽查 2330/2454/3596 與原價逐日相同），**未還原現金股利**。第二輪「還原價」結論應讀為「分割還原、股利以殖利率代理」。sonnet 驗收漏看此點。對 0050 比較：0050 2025 年一拆四，FinMind 原價序列不可直接用，基準改用加權報酬指數（含息）。
