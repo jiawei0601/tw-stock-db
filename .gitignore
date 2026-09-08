@@ -42,3 +42,5 @@ backtest/momentum_dynamic/
 backtest/momentum_dynamic_fixed10/
 
 backtest/momentum_dynamic_fixed10_stop*/
+
+backtest/momentum_weekly_hermes/

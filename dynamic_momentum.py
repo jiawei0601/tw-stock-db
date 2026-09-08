@@ -1,4 +1,5 @@
 """3-1 動態動能與三日成交金額：未認證價格回測，標準庫、唯讀資料。"""
+from bisect import bisect_left, bisect_right
 import argparse
 import csv
 import hashlib
@@ -39,7 +40,7 @@ def load_data():
     return prices,events,calendar,indices,digest.hexdigest(),excluded
 
 
-def signal_table(prices,events,calendar,day):
+def signal_table(prices,events,calendar,day,valid_dates=None):
     past=[d for d in calendar if d<=day]
     ends={d[:7]:d for d in past}
     a,b=ends.get(shift_month(day,-3)),ends.get(shift_month(day,-1))
@@ -48,7 +49,8 @@ def signal_table(prices,events,calendar,day):
     scores=[]
     for sid,rows in prices.items():
         if any(rows.get(d,{}).get('close',0)<=0 for d in (a,b,day)):continue
-        if sum(history<=d<=day and r.get('close',0)>0 and r.get('Trading_Volume',0)>0 for d,r in rows.items())<200:continue
+        count=(bisect_right(valid_dates[sid],day)-bisect_left(valid_dates[sid],history)) if valid_dates is not None else sum(history<=d<=day and r.get('close',0)>0 and r.get('Trading_Volume',0)>0 for d,r in rows.items())
+        if count<200:continue
         ratio=math.prod(v for (s,d),v in events.items() if s==sid and a<d<=b)
         score=rows[b]['close']*ratio/rows[a]['close']-1
         recent=[rows.get(d,{}) for d in past[-3:]]
