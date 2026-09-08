@@ -36,3 +36,5 @@ backtest/entry_timing_detail.csv
 codex-*.log
 agy-validity-2.log
 backtest/corporate_action_candidates.csv
+
+backtest/momentum_dynamic/
