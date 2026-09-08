@@ -15,6 +15,18 @@
 
 ## 資料介面與信任邊界
 
+### 程式模組契約（2026-09-08，先實作、後接完整資料）
+
+- `momentum_engine.py`：標準庫；`run_backtest(data: dict, start: str='2020-01-01', end: str|None=None, fraction: float=0.25, buy_cost: float=0.003, sell_cost: float=0.003) -> dict`。
+- 正規化輸入 JSON：`calendar: list[str]`（獨立市場日曆）、`prices: {sid: {date: {open,close,volume,buyable:bool,sellable:bool}}}`、`securities: list[{stock_id,start,end:null|str,known_at,source}]`（可有多個資格區間，end exclusive）、`events: list[{stock_id,date,known_at,kind,ratio?,cash?,pay_date?,source}]`。kind = split / distribution / delist；ratio 為每舊股取得新股數（distribution 預設 1），cash 為每舊股應收現金，pay_date 為入帳日，delist 現金為實際結算金額。securities 的 end 是事後有效期間資訊，只在到期時適用，不可預先從訊號剔除。
+- `verified: {universe,events,execution,coverage}: bool` 與 `evidence: {各同名鍵: 非空來源字串}` 四項都通過才允許正式績效；這是人工驗收記錄，不是程式自行證明。
+- 輸出含 `certification, signals, trades, cohorts, equity, summary, issues`；不完整輸入拒絕正式運算。`synthetic:true` 為合成展示，永不宣稱真實投資績效。
+- `momentum_data.py`：`audit_cache(db_path: Path, manifest_path: Path) -> dict` 唯讀盤點下載；`load_cache(db_path: Path, manifest_path: Path, evidence_path: Path) -> dict` 從完整快取與已核對的 securities/events/execution 證據 JSON 正規化。不得猜股份比／股利，缺證據直接拒絕。
+- `backtest_momentum.py`：CLI／報表／合成展示；`--audit` 不算收益，`--demo` 合成資料，`--input` 正規化 JSON，或 `--raw-db --manifest --evidence` 真資料接線。輸出 JSON、CSV、Markdown 與獨立 SVG 資產／回撤圖。
+- 各模組分工只改自己檔案，避免覆寫正在執行的下載器。
+
+程式已完成第一版，操作見 `docs/momentum-backtest.md`。補充事件規格：`distribution` 的 ratio 非1時必填 `shares_available_date`；股票股利先列權利、交付後才可出售。到期仍有未交付股份時，部位為 unresolved，不假裝可賣出。減資比例事件需對齊恢復交易日。到期後才收的現金股利由資金梯隊持續入帳，留在原格直到下次輪替再投入。
+
 `fetch_momentum_pit.py` 負責下載，僅寫 `data/momentum_pit/`，不改既有 `data/tw_stocks.db`。
 
 - SQLite `responses`：key = 正規化 query JSON；query、retrieved_at、status、HTTP status、body、sha256。成功空資料保留，失敗不視為完成。認證 header 不落盤。

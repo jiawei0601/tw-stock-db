@@ -11,6 +11,9 @@ __pycache__/
 data/tw_stocks.db
 data/*.db
 data/momentum_pit/
+backtest/momentum_demo/
+backtest/momentum_audit/
+backtest/momentum_pit/
 
 # refresh log（腳本自寫 + 排程 stdout 捕捉），純執行紀錄非資料本體
 data/*.log

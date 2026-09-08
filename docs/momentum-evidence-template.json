@@ -1,0 +1,10 @@
+{
+  "verified": {"universe": false, "events": false, "execution": false, "coverage": false},
+  "evidence": {"universe": "", "events": "", "execution": "", "coverage": ""},
+  "securities": [],
+  "events": [],
+  "execution": {
+    "default": {"buyable": false, "sellable": false, "source": ""},
+    "overrides": {}
+  }
+}
