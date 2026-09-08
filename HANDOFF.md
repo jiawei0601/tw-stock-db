@@ -1,5 +1,11 @@
 # HANDOFF
 
+## 最新：富邦API已安裝查核（Codex，2026-09-08）
+
+- 使用者確認富邦API已開通，但忘記安裝位置。查明Python3.10與Anaconda皆有Fubon Neo2.2.6，兩者SDK import通過；預設Hermes Python沒有SDK，不要誤認整台未安裝。
+- 詳見 `docs/fubon-local-installation.md`。C:\CAFubon下找到pfx，未讀取私密內容或上傳，未登入券商。最新版2.3.0官方zip／whl已下載備用，既有環境未變更。
+- 下一步需安全設定登入並驗證App成交／零股／費稅／庫存覆蓋；目前遠端策略仍需使用者回報成交，尚未自動同步券商。不得宣稱SDK載入等於登入成功。
+
 ## 最新：50萬元動能30%已部署Hetzner/TG（Codex，2026-09-08）
 
 - 策略唯一規格 `docs/momentum30-live-strategy.md`，遠端 `/home/chang/tw-momentum30/STRATEGY.md`。固定引擎 `live_momentum.py`＋原signal_table；暖機種子與實際帳戶均在遠端live_data，不進git。官方TWSE/TPEx增量更新已成功取得9/8，解開先前FinMind額度阻礙，但公司行動仍未完整自動對帳。
