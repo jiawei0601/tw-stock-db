@@ -38,12 +38,15 @@ _MARKET_PATH = {"TWSE": "sii", "TPEx": "otc"}
 # 「因先進製程產品需求增加所致。」）該欄變成 `align=left`。只比對 `align=center` 會讓
 # 大量有備註的公司整列完全不 match、被靜默漏掉（本專案第五輪任務實測 2026-06 TWSE
 # 頁面漏掉的列中就包含 2330，直到核對已知標的才發現），必須兩種 align 都接受。
+# 零比較基數的增長率欄是 <td>&nbsp;</td>，沒有 nowrap。
+# 必須保留這些公司的有效營收，只把無法計算的成長率解析成 None。
 _ROW_RE = re.compile(
     r"<tr align=right><td align=center>([^<]*)</td><td align=left>([^<]*)</td>"
-    r"<td nowrap>([^<]*)</td><td nowrap>([^<]*)</td><td nowrap>([^<]*)</td>"
-    r"<td nowrap>([^<]*)</td>(?:<td|<Td) nowrap>([^<]*)</td>"
-    r"<td nowrap>([^<]*)</td><td nowrap>([^<]*)</td><td nowrap>([^<]*)</td>"
-    r"<td align=(?:left|center)>([^<]*)</td></tr>"
+    r"<td(?: nowrap)?>([^<]*)</td><td(?: nowrap)?>([^<]*)</td><td(?: nowrap)?>([^<]*)</td>"
+    r"<td(?: nowrap)?>([^<]*)</td><td(?: nowrap)?>([^<]*)</td>"
+    r"<td(?: nowrap)?>([^<]*)</td><td(?: nowrap)?>([^<]*)</td><td(?: nowrap)?>([^<]*)</td>"
+    r"<td align=(?:left|center)>([^<]*)</td></tr>",
+    re.IGNORECASE,
 )
 _ANNOUNCE_DATE_RE = re.compile(r"出表日期[:：]\s*(\d+)/(\d+)/(\d+)")
 

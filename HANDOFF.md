@@ -1,5 +1,14 @@
 # HANDOFF
 
+## 最新：subagent補營收來源與歷史版本證據（Codex，2026-09-09）
+
+- 使用者明示開subagent。兩位GPT-5.6 Sol分查官方更正公告與歷史版本，並由其中一位依contract完成CSV補洞匯入；主線下載及審查整合。全部工作已收斂，沒有背景下載或agent待辦。
+- 新獨立DB `data/momentum_pit/revenue_archive/snapshots.db`：414個有效HTML＋官方CSV824列補2個截斷HTML，共190,905股票月份／1,975代號、2018-01至2026-08。首次發現原collector漏KY _1頁及無nowrap成長率欄漏列，已修正後者並補抓前者；保留raw/hash/取得日期，不改tw_stocks.db。
+- 缺口：原2162候選只涵蓋1974，另188無營收，其中92有下市紀錄；8月僅921檔，7月1975。仍非歷史PIT，不能據此宣称營收濾網回測已完成。細節 `docs/tasks/revenue-backfill.md`，合併稽核 `data/momentum_pit/revenue_archive/combined_audit.json`。
+- subagent取得3002／3369官方更正前後值與發言時點；TSMC2019同期PDF四筆版本樣本已實跑2019-12-11濾網pass（9.650469% > 4.421467%）。完整初始公告日期／修訂序列仍無全市場來源，未猜10日補known_on。
+- CSV補洞新模組通過外鍵重匯及交易回滾審查。123相關測試通過；來源報告 `revenue-official-source-audit.md`、`revenue-vintage-source-audit.md` 在docs/tasks。原始證據均在ignored資料目錄，本地保留；原始檔路徑与重现方法已落repo。
+- 未改Hetzner、未跑新的含營收實際績效、未變更券商或實盤帳本；其他agent原有髒檔維持原狀。前次commit680553a，交接者Codex。
+
 ## 最新：單月營收為正且加速濾網（Codex，2026-09-09）
 
 - 使用者確認單月YoY>0且>前月YoY；已完成 `revenue_filter.py`、模擬器entry_filter與比較CLI接線，僅篩新倉，未部署Hetzner。88測試綠。

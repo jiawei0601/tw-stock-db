@@ -43,3 +43,8 @@
 `python -m pytest tests/test_revenue_filter.py tests/test_weekly_hermes_momentum.py tests/test_dynamic_momentum.py tests/test_momentum_data.py tests/test_momentum_engine.py -q`：88項通過。
 
 涵蓋正成長加速、減速／持平／負成長、零基數、缺月、同日公告、未來修訂、過期、版本衝突、拒絕非版本時點JSON、濾網只影響新倉及全通過時與原策略一致。這些是程式驗證，不代表資料已認證，也不是改善績效的證據。
+
+
+## 2026-09-09後續補資料
+
+已另開subagent完成官方公告／版本查核及主線全市場頁面補抓。独立archive合併190,905筆、1,975代號、2018-01至2026-08，含KY外國發行人及CSV補洞。仍缺原候選188檔（其中92有下市紀錄）、8月僅921檔、全市場初始公告及修訂時點未齊，尚不能跑認證無前視營收績效。詳見 `revenue-backfill.md`；TSMC2019兩份原始新聞稿的四筆樣本已實測通過濾網，但不是全市場績效證據。
