@@ -1,5 +1,12 @@
 # HANDOFF
 
+## 最新：單月營收為正且加速濾網（Codex，2026-09-09）
+
+- 使用者確認單月YoY>0且>前月YoY；已完成 `revenue_filter.py`、模擬器entry_filter與比較CLI接線，僅篩新倉，未部署Hetzner。88測試綠。
+- 時點規則逐版本known_on嚴格早於訊號日；保留修訂、不用同日未定時公告、不猜月份日期。完整合約與任務狀態見 `docs/tasks/momentum-revenue-filter.md`。
+- 真實含營收績效比較未完成：本機歷史僅2023-08起，公告日是頁面出表日；FinMind公開API2330實測104筆98筆缺create_time，舊歷史沒有可靠版本時點。不得聲稱已跑出2020起無前視營收績效。下一步補歷史公告版本證據；不把固定延遲假設冒充認證。
+- 原其他agent未提交檔保持原狀；前次commit b2625e3。
+
 ## 最新：週一至週五訊號日比較，休市順延（Codex，2026-09-09）
 
 - 使用者要求指定星期休市順延下一交易日，已加入可選 `signal_weekday`／`roll_holidays` 參數與 `compare_momentum_weekdays.py`，完成五組實跑；原引擎預設保持舊週三跳過，比較腳本全部明確開啟順延。未改Hetzner排程。

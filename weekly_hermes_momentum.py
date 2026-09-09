@@ -47,7 +47,7 @@ def weekly_signal_days(calendar, signal_weekday=2):
     return days
 
 
-def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,observation_days=None,*,momentum_exit=None,net_stop=None,cost_floor=None,ma_exit=None,equity_allocation=False,position_weight=None,peak_stop=None,signal_weekday=2,roll_holidays=False):
+def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,observation_days=None,*,momentum_exit=None,net_stop=None,cost_floor=None,ma_exit=None,equity_allocation=False,position_weight=None,peak_stop=None,signal_weekday=2,roll_holidays=False,entry_filter=None):
     if signal_weekday not in range(5):raise ValueError('signal_weekday 必須為0至4')
     signal_days=weekly_signal_days(calendar,signal_weekday) if roll_holidays else {d for d in calendar if date.fromisoformat(d).weekday()==signal_weekday}
     momentum_exit=(not trailing) if momentum_exit is None else momentum_exit
@@ -105,6 +105,7 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
         if day in tables:
             buys,exits=decisions(current,tables.get(prior,{}),tables.get(older,{}),held)
             if day in signal_days:
+                if entry_filter is not None:buys=[sid for sid in buys if entry_filter(sid,day)]
                 buy_plan=buys
                 plan_target=value*position_weight if position_weight is not None else (value/(len(held)+len(buys)) if buys else 0.)
             if momentum_exit and day==ends[day[:7]]:
