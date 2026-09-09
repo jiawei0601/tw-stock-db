@@ -4,7 +4,7 @@ import csv
 import json
 import math
 import statistics
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from datetime import date, timedelta
 from pathlib import Path
 from dynamic_momentum import load_data, signal_table, decisions, metrics
@@ -33,7 +33,23 @@ def hermes_stages(position,close,averages):
     return [n for n in STAGES if n>max(position['done'],default=0) and n in averages and close<averages[n]]
 
 
-def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,observation_days=None,*,momentum_exit=None,net_stop=None,cost_floor=None,ma_exit=None,equity_allocation=False,position_weight=None,peak_stop=None):
+def weekly_signal_days(calendar, signal_weekday=2):
+    """指定星期休市，順延至下一市場交易日；尾端尚未開市不發訊號。"""
+    if signal_weekday not in range(5):raise ValueError('signal_weekday 必須為0至4')
+    if not calendar:return set()
+    start=date.fromisoformat(calendar[0])
+    target=start+timedelta(days=(signal_weekday-start.weekday())%7)
+    last=date.fromisoformat(calendar[-1]);days=set()
+    while target<=last:
+        pos=bisect_left(calendar,target.isoformat())
+        if pos<len(calendar):days.add(calendar[pos])
+        target+=timedelta(days=7)
+    return days
+
+
+def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,observation_days=None,*,momentum_exit=None,net_stop=None,cost_floor=None,ma_exit=None,equity_allocation=False,position_weight=None,peak_stop=None,signal_weekday=2,roll_holidays=False):
+    if signal_weekday not in range(5):raise ValueError('signal_weekday 必須為0至4')
+    signal_days=weekly_signal_days(calendar,signal_weekday) if roll_holidays else {d for d in calendar if date.fromisoformat(d).weekday()==signal_weekday}
     momentum_exit=(not trailing) if momentum_exit is None else momentum_exit
     net_stop=(not trailing) if net_stop is None else net_stop
     cost_floor=trailing if cost_floor is None else cost_floor
@@ -88,7 +104,7 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
         current=tables.get(day,{})
         if day in tables:
             buys,exits=decisions(current,tables.get(prior,{}),tables.get(older,{}),held)
-            if date.fromisoformat(day).weekday()==2:
+            if day in signal_days:
                 buy_plan=buys
                 plan_target=value*position_weight if position_weight is not None else (value/(len(held)+len(buys)) if buys else 0.)
             if momentum_exit and day==ends[day[:7]]:

@@ -1,5 +1,12 @@
 # HANDOFF
 
+## 最新：週一至週五訊號日比較，休市順延（Codex，2026-09-09）
+
+- 使用者要求指定星期休市順延下一交易日，已加入可選 `signal_weekday`／`roll_holidays` 參數與 `compare_momentum_weekdays.py`，完成五組實跑；原引擎預設保持舊週三跳過，比較腳本全部明確開啟順延。未改Hetzner排程。
+- 相同3−1、5%NAV、30%高點停損、月底動能出場。週一至五期末417.35／506.58／410.70／340.06／335.70萬元；週二本樣本最佳，但未做樣本外認證。週三休市順延使期末較舊跳過版少63.98萬，兩種效果分開說明。
+- 77測試通過；五組2022年底前綴檢查通過。仍為未含完整公司行動的診斷價格回測，21,082矛盾高價限制延續。
+- 完整報告 `analysis/momentum-weekdays-2026-09-09.md`；ignored輸出 `backtest/momentum_rerun_20260909_weekdays/`。重現 `python compare_momentum_weekdays.py`。其他agent檔案保持原狀；前次commit bed5a47。
+
 ## 最新：淨值圖 Y 軸改為每格100萬元（Codex，2026-09-09）
 
 - 已同步修正 `docs/templates/momentum-trades.html` 與本機 `backtest/momentum_rerun_20260909/交易紀錄.html`；刻度固定100萬元，上界依淨值高點加4%後向上取整。回測數據未變。

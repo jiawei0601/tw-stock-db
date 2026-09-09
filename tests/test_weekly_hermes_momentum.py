@@ -319,3 +319,30 @@ def test_diagnostic_missing_high_uses_known_same_day_prices():
     adjusted,audit=diagnostic_high_envelope({'A':{'2020-01-01':dict(open=100,close=110,Trading_Volume=1)}})
     assert adjusted['A']['2020-01-01']['max']==110
     assert audit[0]['raw_high'] is None
+
+
+def test_signal_weekday_fills_next_session_including_weekend():
+    from datetime import date
+    ds=['2019-11-29','2019-12-31','2020-01-06','2020-01-07','2020-01-08','2020-01-09','2020-01-10','2020-01-13']
+    prices={'A':{d:dict(open=100,close=100,Trading_Volume=1) for d in ds}}
+    tables={d:{'A':row(.1 if d<'2020' else .2)} for d in ds}
+    for weekday in range(5):
+        result=simulate_weekly(prices,{},ds,tables,False,signal_weekday=weekday)
+        first=result[3][0]
+        signal=next(d for d in ds if d>='2020' and date.fromisoformat(d).weekday()==weekday)
+        assert first['date']==ds[ds.index(signal)+1]
+        assert first['filled']
+    holiday=[d for d in ds if d!='2020-01-08']
+    assert not simulate_weekly(prices,{},holiday,tables,False,signal_weekday=2)[3]
+
+
+def test_holiday_signal_rolls_then_fills_following_session():
+    from weekly_hermes_momentum import weekly_signal_days
+    ds=['2019-11-29','2019-12-31','2020-01-06','2020-01-07','2020-01-09','2020-01-10','2020-01-13','2020-01-14']
+    prices={'A':{d:dict(open=100,close=100,Trading_Volume=1) for d in ds}}
+    tables={d:{'A':row(.1 if d<'2020' else .2)} for d in ['2019-11-29','2019-12-31','2020-01-09']}
+    result=simulate_weekly(prices,{},ds,tables,False,signal_weekday=2,roll_holidays=True)
+    assert result[3][0]['date']=='2020-01-10'
+    assert weekly_signal_days(['2020-01-09','2020-01-13','2020-01-14'],4)=={'2020-01-13'}
+    assert weekly_signal_days(['2020-01-09'],4)==set()
+    assert weekly_signal_days(['2020-01-07','2020-01-20','2020-01-21'],2)=={'2020-01-20'}
