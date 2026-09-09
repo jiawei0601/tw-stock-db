@@ -5,11 +5,11 @@ from pathlib import Path
 
 
 class ListedUniverse:
-    def __init__(self, records):
+    def __init__(self, records, *, allowed_markets=('TWSE','TPEX')):
         self.intervals = {}
         for r in records:
             sid, start, end = r['stock_id'], r['start'], r.get('end')
-            if r['market'] not in ('TWSE','TPEX') or not r.get('source'):
+            if r['market'] not in allowed_markets or not r.get('source'):
                 raise ValueError('require evidenced TWSE/TPEX interval')
             if date.fromisoformat(start).isoformat()!=start:
                 raise ValueError('invalid start date')

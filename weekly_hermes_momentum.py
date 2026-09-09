@@ -47,7 +47,7 @@ def weekly_signal_days(calendar, signal_weekday=2):
     return days
 
 
-def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,observation_days=None,*,momentum_exit=None,net_stop=None,cost_floor=None,ma_exit=None,equity_allocation=False,position_weight=None,peak_stop=None,signal_weekday=2,roll_holidays=False,entry_filter=None):
+def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,observation_days=None,*,momentum_exit=None,net_stop=None,cost_floor=None,ma_exit=None,equity_allocation=False,position_weight=None,peak_stop=None,signal_weekday=2,roll_holidays=False,entry_filter=None,execution_price=None,execution_capacity=None,sale_cash_at_close=None,reserve_buy_cash_until_close=None):
     if signal_weekday not in range(5):raise ValueError('signal_weekday 必須為0至4')
     signal_days=weekly_signal_days(calendar,signal_weekday) if roll_holidays else {d for d in calendar if date.fromisoformat(d).weekday()==signal_weekday}
     momentum_exit=(not trailing) if momentum_exit is None else momentum_exit
@@ -59,6 +59,7 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
     ma_cache={} if ma_cache is None else ma_cache
     for day in calendar:
         if day<'2020-01-01':continue
+        late_sale_cash=0.;unspent_reserved_cash=0.
         for sid,p in held.items():
             ratio=events.get((sid,day),1.)
             p['original_shares']*=ratio;p['mark']/=ratio
@@ -70,13 +71,17 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
                     pending[sid]=dict(full=True,stages=[],reason='observation_90',signal=deadline)
         for sid,order in list(pending.items()):
             r=prices[sid].get(day,{})
-            if r.get('open',0)<=0 or r.get('Trading_Volume',0)<=0:continue
+            fill_price=execution_price(sid,day,r,'sell') if execution_price else r.get('open',0)
+            if not math.isfinite(fill_price) or fill_price<=0 or r.get('Trading_Volume',0)<=0:continue
             p=held[sid]
             fraction=p['remaining'] if order['full'] else min(p['remaining'],sum(STAGES[n] for n in order['stages']))
-            proceeds=p['original_shares']*fraction*r['open']*.997
-            cash+=proceeds;p['proceeds']+=proceeds;p['remaining']-=fraction
+            if execution_capacity and not execution_capacity(sid,day,r,'sell',p['original_shares']*fraction):continue
+            proceeds=p['original_shares']*fraction*fill_price*.997
+            if sale_cash_at_close and sale_cash_at_close(sid,day):late_sale_cash+=proceeds
+            else:cash+=proceeds
+            p['proceeds']+=proceeds;p['remaining']-=fraction
             p['done'].update(order['stages'])
-            legs.append(dict(stock_id=sid,entry=p['entry'],signal_date=order['signal'],exit=day,reason=order['reason'],fraction_original=fraction,cost=p['cost']*fraction,proceeds=proceeds,pnl=proceeds-p['cost']*fraction,exit_open=r['open'],signal_peak=p.get('signal_peak'),signal_stop_level=p.get('signal_stop_level'),signal_close=p.get('signal_close')))
+            legs.append(dict(stock_id=sid,entry=p['entry'],signal_date=order['signal'],exit=day,reason=order['reason'],fraction_original=fraction,cost=p['cost']*fraction,proceeds=proceeds,pnl=proceeds-p['cost']*fraction,exit_open=fill_price,signal_peak=p.get('signal_peak'),signal_stop_level=p.get('signal_stop_level'),signal_close=p.get('signal_close')))
             del pending[sid]
             if p['remaining']<1e-9:
                 roundtrips.append(dict(stock_id=sid,entry=p['entry'],exit=day,cost=p['cost'],proceeds=p['proceeds'],return_net=p['proceeds']/p['cost']-1,days=(date.fromisoformat(day)-date.fromisoformat(p['entry'])).days,last_reason=order['reason']))
@@ -84,12 +89,19 @@ def simulate_weekly(prices,events,calendar,tables,trailing=True,ma_cache=None,ob
         budget=plan_target if position_weight is not None else (min(plan_target,cash/len(buy_plan)) if equity_allocation and buy_plan else 100_000.)
         for sid in buy_plan:
             r=prices[sid].get(day,{})
-            filled=(equity_allocation or position_weight is not None or len(held)<10) and budget>1e-8 and cash+1e-8>=budget and r.get('open',0)>0 and r.get('Trading_Volume',0)>0
+            affordable=budget>1e-8 and cash+1e-8>=budget
+            reserved=affordable and reserve_buy_cash_until_close and reserve_buy_cash_until_close(sid,day)
+            if reserved:cash-=budget
+            fill_price=execution_price(sid,day,r,'buy') if execution_price else r.get('open',0)
+            filled=(equity_allocation or position_weight is not None or len(held)<10) and affordable and math.isfinite(fill_price) and fill_price>0 and r.get('Trading_Volume',0)>0
+            if filled and execution_capacity:filled=execution_capacity(sid,day,r,'buy',budget/(fill_price*1.003))
             orders.append(dict(date=day,stock_id=sid,filled=filled,budget=budget))
             if filled:
-                cash-=budget
-                held[sid]=dict(entry=day,cost=budget,original_shares=budget/(r['open']*1.003),remaining=1.,done=set(),mark=r['open'],proceeds=0.,ever20=False,high_water=r['open'])
-        buy_plan=[];cash=max(cash,0.)
+                if not reserved:cash-=budget
+                held[sid]=dict(entry=day,cost=budget,original_shares=budget/(fill_price*1.003),remaining=1.,done=set(),mark=fill_price,proceeds=0.,ever20=False,high_water=fill_price)
+            elif reserved:unspent_reserved_cash+=budget
+        # 全天VWAP賣出所得不能倒流去支付同日上午已排定的買單。
+        buy_plan=[];cash=max(cash,0.)+late_sale_cash+unspent_reserved_cash
         value=zero=cash;missing=0
         for sid,p in held.items():
             r=prices[sid].get(day,{})

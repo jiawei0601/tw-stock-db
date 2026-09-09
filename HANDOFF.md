@@ -1,5 +1,16 @@
 # HANDOFF
 
+## 已完成：含興櫃23組回測，收益主要改善來自歷史暖機（Codex，2026-09-09）
+
+- 使用者要求正式回測含興櫃收益，另要求每10分鐘回報下載；heartbeat `automation`已在下載完成後設PAUSED。所有下載／回測程序完成，無殘留背景工作。行情中斷一次後成功續傳最後4檔，356/356請求完成。
+- 契約 `docs/tasks/emerging-market-backtest.md`；主線新`emerging_market.py`、`compare_emerging_momentum.py`，共用engine新增execution_price/capacity/sale_cash_at_close可選hook。FinMind興櫃open=前日均價，改下一交易日VWAP、0/0.5%/1%滑價；1%日股數容量；VWAP賣出所得延後日終入cash，避免資金時間倒流。
+- A只上市櫃；B只買上市櫃但可用興櫃歷史、排名仍只上市櫃；C包含興櫃買入與排名。23組完成（各版本純動能＋base/all×15/30，C再加0.5%/1%每邊滑價）。所有5個A精確重現先前收益與交易結果，A/base15為4225872.4945231825元、590交易。
+- 期末萬元（A/B/C，C額外滑價0）：base15=422.59/523.29/425.52；base30=468.47/568.76/524.86；all15=347.35/514.50/539.47；all30=382.78/532.99/506.93。四組B−A皆正，C−B只有all15正。C直接興櫃買入的完成交易33/28/12/13筆，淨損益−34.56/−37.78/−15.72/−17.80萬元；組合差額另受上市櫃排名／資金路徑影響，不能當成該損益加總。
+- 股票池官方raw/intervals與FinMind增量行情、ROTC營收在ignored `data/momentum_pit/emerging_universe/`。營收208頁完成，19228筆363股，與原營收0重複／衝突；合計214221股月。補價356檔，模型實際需355檔、88檔證明不足暖機（下載日曆含原已排除的2026-07-10，因此比最終模型多抓1檔）。已核實區間行情列覆蓋TWSE99.843%、TPEX99.831%、EMERGING99.368%；355補價檔無空回應。
+- Sol來源worker完成backfill_emerging_universe.py與6測試；artifact固定SHA256 `0f900d1a70b7eeaf08bca4082349923c9d25e0150f25a57a3430ac0dff8b2000`，保留2002上市櫃interval，新增1331興櫃interval，788興櫃ID與下載期間交集，170未知終止cycle保守排除，無跨市場矛盾。7610興櫃[2022-09-30,2025-09-09)，之後TWSE；4969已處理官方撤銷終止公告。早期登錄／终止資料不完整，不聲稱全歷史PIT。
+- 23組NAV／出場截斷一致、14205筆技術特徵前綴一致；原始行情＋截斷資格獨立重建一致。所有成交資格/訊號/200日通過；期末資格外未解決估值均0；修正市場open語意後high-envelope修正列數0。192項相關測試（190+下載中斷2）綠。全套另有7項無關資料／其他模組失敗（群組19/20、營收/法人孤兒資料、資料新鮮度、Fubon mock），本輪未修改。
+- 新HTML/JSON/每組CSV與交易HTML在 `backtest/momentum_rerun_20260909_emerging/`，分析 `analysis/momentum-emerging-2026-09-09.md`；4舊MD與3舊HTML再加興櫃open錯用更正，不能拿舊unrestricted收益冒充有效興櫃收益。ADR `docs/adr/2026-09-09-emerging-execution.md`。重跑`python backfill_emerging_universe.py --offline`→`python fetch_emerging_prices.py`→`python fetch_emerging_revenue.py`→`python compare_emerging_momentum.py --allow-snapshot-research`。未改實盤，上一提交63b1b13，Codex整合；其他任務dirty檔原狀保留。
+
 ## 最新：限定歷史上市／上櫃並重跑，舊收益優勢撤回（Codex，2026-09-09）
 
 - 使用者明示僅限上市上櫃。新`ListedUniverse`按官方有效起迄mask行情，排名、動能、200日暖機、MA與成交均限定。本研究採嚴格暖機口徑，創新板仍上市；不新增排除已上市TDR的資產分類變更。CLI `compare_momentum_entry_filters.py --allow-snapshot-research`現預設限定版；`--legacy-unrestricted`只追溯。
