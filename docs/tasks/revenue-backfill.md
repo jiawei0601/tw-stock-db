@@ -46,3 +46,16 @@ CSV重現匯入：以 `revenue_archive_csv.store_csv` 讀本機official_csv的ra
 重跑HTML：`python backfill_revenue_archive.py`，有效URL快取跳過；先前失敗預設不重試，需經診斷後明示 `--retry-failed`。解析器升級時用 `--reparse` 重讀原始頁。來源失敗頁不進合併有效數據，CSV補洞另有來源證據。
 
 兩個subagent已找到官方更正前後值／時間，以及TSMC同期新聞稿四筆可驗算版本樣本。來源報告分見 `revenue-official-source-audit.md` 與 `revenue-vintage-source-audit.md`。全市場原始公告與完整修訂時點仍未補齊，不能執行認證的2020起營收策略績效。
+
+
+## 下一輪補資料順序（2026-09-09追加查核）
+
+重新以FinMind原始股價檢查188個缺營收候選：82檔在2020-01-01至2026-09-07至少有一天成交量>0；106檔沒有該期間成交。後者暫降低補齊優先級，不把它們全稱為影響2020回測的缺股。
+
+五種星期基準回測實際成交且缺營收的股票有7檔：1701、2456、3454、4141、5371、6457、9103。它們優先補，但不能只補這7檔就跑策略，因加入濾網會改變現金與其他候選成交路徑。再补其餘75檔期間內有交易的缺股，並檢查已有營收股票的月內缺口。
+
+FinMind TaiwanStockMonthRevenue公開API實測（start_date=2018-01-01,end_date=2026-09-09）：2358回83筆，2456回48筆，2311回0筆，均API status200。原始回應保存在 `backtest/momentum_rerun_20260909_revenue_audit/missing_probes/`。證明下市公司數值可從FinMind補部分，不代表所有82檔都能補，也不能把date欄當公告日。
+
+數值補齊與時點補齊應分開：前者使用FinMind逐股與MOPS公司別補洞並保留衝突；後者需要同期原始公告或可查證的歷史版本供應商。固定月中／月底延遲只適合明示假設的敏感度研究，無法消除後來更正值被回填的偏誤。
+
+TEJ/TQuant官方列有Point-in-time資料集與月營收資料，可詢問具體方案是否包含原始公告日、原值、每次更正日期與更正前後值、下市歷史；不能僅因產品名稱有PIT就直接認證。來源：https://tquant.tejwin.com/資料集/ ，https://www.tejwin.com/qa-category/營運面/ 。尚未聯繫或購買。
