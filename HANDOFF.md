@@ -1,5 +1,12 @@
 # HANDOFF
 
+## 最新：下載完成後動能30%價格回測已重跑（Codex，2026-09-09）
+
+- 使用者要求重新回測，已實際重跑固定週三3−1／5%NAV／30%高點回落版本。結果和前版JSON完全相同（100萬→474.68萬、CAGR26.26%、MDD−51.73%、662筆），不是含息正式績效。原因：現有引擎讀取的價格／分割資料指紋不變，新下載股利／減資尚未接入。
+- 8,655請求cache audit complete=true，missing/failed/invalid=0；manifest截至2026-09-07。仍NOT_CERTIFIED，未改raw資料或verified旗標。2022年底前綴測試重跑通過，75相關測試綠。
+- 報告 `analysis/momentum-rerun-2026-09-09.md`；獨立本機CSV/JSON/HTML在 `backtest/momentum_rerun_20260909/`，audit在相鄰 `_audit` 目錄。21,082矛盾高價仍診斷暫代，不可將新下載完成解讀為已解決公司行動與存活偏誤。正式含息接線未實作。
+- 舊結果已備份 `_before_20260909`；實盤50萬與Hetzner設定未改。其他agent未提交TWSE抽驗／回測檔維持原狀。前次commit a570e6e。
+
 ## 最新：Hetzner每日富邦庫存已啟用（Codex，2026-09-08）
 
 - 使用者確認先前API Key貼錯，重新本機輸入後，Hetzner真實API Key登入與庫存查詢成功、已登出；再次測試Hermes前置腳本成功，1個證券帳戶、12檔正餘額、庫存日2026-09-08。
