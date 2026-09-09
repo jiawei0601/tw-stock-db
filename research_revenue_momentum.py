@@ -44,10 +44,14 @@ class SnapshotGate:
 
     此假設無法消除修訂偏誤。與RevenueFilter的真實known_on路徑分開。
     """
-    def __init__(self, values, lag_days, require_growth=True):
+    def __init__(self, values, lag_days, require_growth=True, *, rule='yoy_acceleration', common_coverage=False):
+        if rule not in ('yoy_acceleration', 'three_month_revenue'):
+            raise ValueError('unknown revenue rule')
         self.values = values
         self.lag_days = lag_days
         self.require_growth = require_growth
+        self.rule = rule
+        self.common_coverage = common_coverage
         self.audit = []
 
     def evaluate(self, sid, day):
@@ -55,17 +59,24 @@ class SnapshotGate:
         month = month_shift(day[:7], -1)
         while date.fromisoformat(month_shift(month, 1) + '-01') + timedelta(days=self.lag_days - 1) >= signal:
             month = month_shift(month, -1)
-        months = [month_shift(month, k) for k in (0, -1, -12, -13)]
+        offsets = (0, -1, -12, -13) if self.rule == 'yoy_acceleration' else (0, -1, -2, -12)
+        if self.common_coverage:
+            offsets = (0, -1, -2, -12, -13)
+        months = [month_shift(month, k) for k in offsets]
         result = dict(stock_id=sid, signal_day=day, revenue_month=month, coverage=False,
-                      passed=False, yoy=None, previous_yoy=None, reason='missing_or_conflicting_month')
+                      passed=False, yoy=None, previous_yoy=None, revenue=None, previous_revenue=None,
+                      two_months_ago_revenue=None, reason='missing_or_conflicting_month')
         if any((sid, m) not in self.values for m in months):return result
-        current, previous, year_ago, previous_year_ago = [self.values[sid, m] for m in months]
-        if year_ago <= 0 or previous_year_ago <= 0:
+        data = {k:self.values[sid, month_shift(month, k)] for k in offsets}
+        if data[-12] <= 0 or (-13 in data and data[-13] <= 0):
             return {**result, 'reason': 'nonpositive_comparison_base'}
-        yoy, prior = current / year_ago - 1, previous / previous_year_ago - 1
-        passed = not self.require_growth or (yoy > 0 and yoy > prior)
+        yoy = data[0] / data[-12] - 1
+        prior = data[-1] / data[-13] - 1 if -13 in data else None
+        growth = yoy > 0 and (yoy > prior if self.rule == 'yoy_acceleration' else data[0] > data[-1] > data[-2])
+        passed = not self.require_growth or growth
         return {**result, 'coverage': True, 'passed': passed, 'yoy': yoy, 'previous_yoy': prior,
-                'reason': 'pass' if passed else 'not_positive_or_accelerating'}
+                'revenue': data[0], 'previous_revenue': data[-1], 'two_months_ago_revenue': data.get(-2),
+                'reason': 'pass' if passed else ('not_positive_or_accelerating' if self.rule == 'yoy_acceleration' else 'not_positive_or_three_month_rising')}
 
     def __call__(self, sid, day):
         row = self.evaluate(sid, day)
