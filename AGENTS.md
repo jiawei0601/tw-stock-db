@@ -25,6 +25,8 @@ build/run 段落與 Interface Contract。**【第十一輪，本專案主產出�
 
 ## 專案慣例
 
+- **動能策略股票池（使用者2026-09-09確認）僅限上市、上櫃**：按訊號日及成交日的歷史有效資格判斷，不用現在身分回填興櫃時段。TWSE創新板屬上市；已核實上櫃轉上市期間可連續使用。當前研究預設採嚴格口徑：僅用上市／上櫃期間行情建立排名、200日暖機與均線；資格未知期間排除並揭露涵蓋缺口，不猜上市起日。`compare_momentum_entry_filters.py`為此限定版入口，`--legacy-unrestricted`僅供舊結果追溯，不符合當前股票池規則。現存registry不能冒充完整歷史股票池。
+
 - 語言 / 框架：Python 3.11+、requests、sqlite3（標準庫）、pytest。**不用 pandas**
   （資料量小、只需一次性批次寫入，沒有 pandas 帶來的價值，保持依賴精簡）。
 - 風格 / 命名：函式 `snake_case`；SQLite 欄位一律小寫 snake；日期一律 `YYYY-MM-DD` 字串。

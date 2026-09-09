@@ -1,5 +1,14 @@
 # HANDOFF
 
+## 最新：限定歷史上市／上櫃並重跑，舊收益優勢撤回（Codex，2026-09-09）
+
+- 使用者明示僅限上市上櫃。新`ListedUniverse`按官方有效起迄mask行情，排名、動能、200日暖機、MA與成交均限定。本研究採嚴格暖機口徑，創新板仍上市；不新增排除已上市TDR的資產分類變更。CLI `compare_momentum_entry_filters.py --allow-snapshot-research`現預設限定版；`--legacy-unrestricted`只追溯。
+- Sol worker完成5個官方bulk資料源模組 `backfill_listed_universe.py`＋raw：2002候選有區間（1978 current含4TDR＋24歷史TWSE）、160未知（75有行情）；42轉板的prior TPEX起日未知，保守排除。已做有界TPEx歷史起日來源探測，無可補證據，不推首行情／更新日期。來源與限制 `data/momentum_pit/listed_universe/intervals.json`。
+- 正式13組：純動能403.41萬；營收基準15／30天422.59／468.47萬，MDD−44.56%／−42.29%；三項合併347.35／382.78萬、MDD−36.56%／−39.48%，勝率42.15%／44.60%，原「三項合併收益與回撤同時改善」結論不成立。原收益561.90／577.90萬只保留舊報告追溯。
+- 7610上市2025-09-09，2026-02-04上市後只有101有效日；200th=2026-07-09。13組均無7610成交。所有買入訊號／成交日期、200有效日、13組2022年底前綴及5006特徵檢查通過；末期資格外未平倉0。150相關測試綠，原raw價格營收未改。
+- 新HTML/CSV/JSON在 `backtest/momentum_rerun_20260909_entry_filters_listed/`，`old_scope_violations.csv`區分未核實區間、未知股票、暖機不足。排除233866行情列，保留3310695列。新報告 `analysis/momentum-entry-listed-2026-09-09.md`；4份舊MD＋3舊HTML加更正標记。缺轉板前區間不一律等於興櫃，完整PIT/公司行動/營收修訂仍未認證。
+- ADR `docs/adr/2026-09-09-listed-universe.md`、任務 `docs/tasks/listed-universe-repair.md`、AGENTS已寫永久市場限制。未動Hetzner/券商實盤；無背景下載。前次commit3d04ba9，Codex整合；其他agent原未提交檔原狀保留。
+
 ## 最新：勝率相近但收益增加的交易歸因（Codex，2026-09-09）
 
 - 使用者要求分析原因，新增 `analyze_entry_filter_returns.py`讀12組既有CSV，不重跑／改策略。報告 `analysis/momentum-entry-return-attribution-2026-09-09.md`，ignored結果 `backtest/momentum_rerun_20260909_entry_filters/return_attribution.json`。
