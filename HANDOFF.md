@@ -1,5 +1,14 @@
 # HANDOFF
 
+## 最新：提高勝率的進場條件比較完成（Codex，2026-09-09）
+
+- 使用者要求分測個股趨勢、大盤及避免追高。新增研究TechnicalFeatures／TechnicalEntryGate；個股close>20MA且20MA高於5市場日前、大盤加權價格close>60MA、趨勢且close<=1.10×20MA；再做兩項／三項合併。15／30天各六組共12組，基準為上一輪三月營收遞增版本，其他策略設定不變。
+- 全部新增條件皆未提高同延遲基準勝率。三項合併期末561.90／577.90萬、MDD−34.67%／−39.75%，PF2.214／2.272，勝率43.97%／45.54%低於基準44.84%／46.53%；平均現金約22%，不能當成純选股準確率改善。單獨大盤降低收益／勝率；個股趨勢收益對延遲敏感。
+- `compare_momentum_entry_filters.py --allow-snapshot-research`完成兩基準精確重現、12組2022年底前綴與5,243筆技術特徵截斷驗證。HTML淨值每格100萬元；產物 `backtest/momentum_rerun_20260909_entry_filters/`，追蹤報告 `analysis/momentum-entry-filters-2026-09-09.md`，合約／任務 `docs/tasks/momentum-entry-filters.md`。
+- Sol worker獨立補官方TWSE加權價格指數94月／1886日，原始JSON+hash保留 `data/momentum_pit/entry_market_index/`；790筆本機交叉一致。原FinMind多出的2026-07-10已由既有load_data排除，實際有效日曆MA60完整，不以含息指數替代。
+- 137相關測試綠，Sol唯讀審查未發現實質時點／分割問題。HTML結構12條NAV線與結果數字驗證完成，未聲稱已做瀏覽器目視檢查。資料coverage元資料最後更新後已核對指數值指紋不變，刷新結果內的來源檔案hash。
+- 不改實盤、Hetzner、券商；營收快照與歷史公司行動／股票池限制仍在，不是PIT認證或獨立樣本外證明。前次commit21520f0；本輪Codex整合，其他agent既有未提交TWSE／回測檔維持原狀。
+
 ## 最新：三個月營收遞增濾網比較完成（Codex，2026-09-09）
 
 - 使用者確認最近三個月營收金額依序增加、最新月YoY>0；公式R(m)>R(m−1)>R(m−2)，三個月份、兩次增加。研究SnapshotGate新增rule及common_coverage，嚴格RevenueFilter／實盤不變。
