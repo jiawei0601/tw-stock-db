@@ -189,6 +189,9 @@ def backfill_market(
             failed.append(f"{market} {iso_date}（{err}）")
             return False
         is_trading_day = len(rows) > 0
+        if not is_trading_day and d >= today:
+            # 當天資料可能尚未公布（清晨補跑），不記非交易日，留給下次重抓
+            return False
         _log_day(conn, market, iso_date, is_trading_day)
         if rows:
             conn.executemany(
