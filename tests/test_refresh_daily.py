@@ -120,7 +120,7 @@ def _fake_run_factory(fail_scripts, git_behavior=None):
     """
     git_behavior = git_behavior or {}
 
-    def fake_run(cmd, cwd=None, capture_output=None, text=None):
+    def fake_run(cmd, cwd=None, capture_output=None, text=None, **_kwargs):
         if cmd[0] == "git":
             sub = cmd[1]
             rc = git_behavior.get(sub, 0)
@@ -245,7 +245,7 @@ def _fake_git_run_factory(diff_rc=0, commit_rc=0, push_rc=0, add_rc=0):
     完整 cmd，供斷言呼叫順序與參數（白名單、commit message、push 目標）。"""
     calls: list[list[str]] = []
 
-    def fake_run(cmd, cwd=None, capture_output=None, text=None):
+    def fake_run(cmd, cwd=None, capture_output=None, text=None, **_kwargs):
         calls.append(list(cmd))
         if cmd[0] != "git":
             return SimpleNamespace(returncode=0, stdout="ok", stderr="")

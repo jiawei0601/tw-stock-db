@@ -31,6 +31,7 @@ Exit code：全部成功 = 0；有任何步驟失敗 = 1（供排程系統判斷
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -98,8 +99,11 @@ def run_step(script: str, repo_root: Path = REPO_ROOT) -> tuple[bool, float]:
         result = subprocess.run(
             [sys.executable, str(script_path)],
             cwd=str(repo_root),
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         success = result.returncode == 0
     except Exception as e:  # noqa: BLE001 - 單步任何例外都不可中止整條刷新鏈
@@ -138,6 +142,8 @@ def run_publish_step(repo_root: Path = REPO_ROOT) -> tuple[bool, float]:
             cwd=str(repo_root),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if add_result.returncode != 0:
             success = False
@@ -148,6 +154,8 @@ def run_publish_step(repo_root: Path = REPO_ROOT) -> tuple[bool, float]:
                 cwd=str(repo_root),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if diff_result.returncode == 0:
                 _log("  無變更，跳過發布")
@@ -158,6 +166,8 @@ def run_publish_step(repo_root: Path = REPO_ROOT) -> tuple[bool, float]:
                     cwd=str(repo_root),
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                 )
                 if commit_result.returncode != 0:
                     success = False
@@ -168,6 +178,8 @@ def run_publish_step(repo_root: Path = REPO_ROOT) -> tuple[bool, float]:
                         cwd=str(repo_root),
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                     )
                     if push_result.returncode != 0:
                         success = False
